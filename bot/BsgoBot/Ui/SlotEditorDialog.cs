@@ -55,13 +55,13 @@ public sealed class SlotEditorDialog : Form
     public SavedSlot Result { get; private set; } = new();
 
     public SlotEditorDialog(WorldState world, FarmBot bot, int hex, SavedSlot? existing,
-                            IReadOnlyList<ushort> knownSlots)
+                            IReadOnlyList<ushort> knownSlots, int weaponHexes)
     {
         _world = world;
         _bot = bot;
         _hex = hex;
 
-        Text = hex <= LoadoutView.WeaponHexes ? $"Weapon hex {hex}" : $"Ability bar slot {hex - LoadoutView.WeaponHexes}";
+        Text = hex <= weaponHexes ? $"Weapon hex {hex}" : $"Ability bar slot {hex - weaponHexes}";
         Width = 560;
         Height = 620;
         FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -73,7 +73,7 @@ public sealed class SlotEditorDialog : Form
         Font = Theme.Ui;
         HandleCreated += (_, _) => Theme.UseDarkTitleBar(this);
 
-        _slotId = new TextField(existing?.SlotId is > 0 ? existing.SlotId.ToString() : "",
+        _slotId = new TextField(existing is { Bound: true } ? existing.SlotId.ToString() : "",
             placeholder: knownSlots.Count > 0
                 ? $"known: {string.Join(" ", knownSlots.Take(10))}"
                 : "nothing seen yet — fire it in game",
@@ -82,7 +82,7 @@ public sealed class SlotEditorDialog : Form
         foreach (var t in Enum.GetValues<ShipSlotType>()) _category.Items.Add(t);
         _category.SelectedItem = Enum.TryParse<ShipSlotType>(existing?.Category ?? "", true, out var cat)
             ? cat
-            : hex <= LoadoutView.WeaponHexes ? ShipSlotType.Gun : ShipSlotType.Undefined;
+            : hex <= weaponHexes ? ShipSlotType.Gun : ShipSlotType.Undefined;
 
         foreach (var (label, _) in Roles) _role.Items.Add(label);
         int roleIndex = 0;
@@ -145,10 +145,13 @@ public sealed class SlotEditorDialog : Form
         var test = new FlatButton { Text = "Test fire", Width = 88 };
         test.Click += (_, _) => TestFire();
 
+        var fill = new FlatButton { Text = "Fill from game", Width = 108, Primary = true };
+        fill.Click += (_, _) => AutoFill(overwrite: ModifierKeys.HasFlag(Keys.Shift));
+
         Row("ABILITY / SLOT ID", _slotId, null);
         _slotId.Width = 92;
-        _bind.Bounds = new Rectangle(246, y - 32, 118, 26);
-        test.Bounds = new Rectangle(370, y - 32, 88, 26);
+        _bind.Bounds = new Rectangle(246, y - 32, 106, 26);
+        test.Bounds = new Rectangle(356, y - 32, 74, 26);
         body.Controls.Add(_bind);
         body.Controls.Add(test);
 
@@ -156,7 +159,20 @@ public sealed class SlotEditorDialog : Form
         _wire.Font = Theme.MonoSmall;
         _wire.ForeColor = Theme.Muted;
         body.Controls.Add(_wire);
-        y += 40;
+        y += 38;
+
+        // Its own row under the id, because it is the step that follows binding: say which slot
+        // this is, then let the server's own card fill in everything below.
+        fill.Bounds = new Rectangle(146, y, 108, 26);
+        body.Controls.Add(fill);
+        body.Controls.Add(new Label
+        {
+            Bounds = new Rectangle(262, y + 5, 270, 18),
+            Font = Theme.UiSmall,
+            ForeColor = Theme.Faint,
+            Text = "fills blanks from the card · shift = overwrite",
+        });
+        y += 34;
 
         body.Controls.Add(new Panel
         {
@@ -243,6 +259,88 @@ public sealed class SlotEditorDialog : Form
         ShowWireFacts();
     }
 
+    /// <summary>
+    /// Fills the form from the server's own catalogue.
+    ///
+    /// The chain is <c>slot id → fitted system guid → ShipSystem card → ShipAbility card</c>, and
+    /// the ability's <c>ItemBuffAdd</c> is the very block the server reads when it decides
+    /// whether a shot is in range and what it costs. So these are not estimates that happen to
+    /// agree with the game — they are the numbers the game enforces.
+    ///
+    /// Only empty fields are filled. Anything you have already typed is left alone, because the
+    /// point is to save you the typing, not to overrule you.
+    /// </summary>
+    private void AutoFill(bool overwrite)
+    {
+        if (SlotIdValue() is not { } id)
+        {
+            MessageBox.Show("Bind this hex to a slot first — the catalogue is looked up by what "
+                          + "the server says is fitted in that slot.",
+                "No slot id", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        var live = _world.MyLoadout?.Slot(id);
+        if (live is null || !live.Filled)
+        {
+            MessageBox.Show($"The server hasn't said what is fitted in slot #{id} yet. "
+                          + "Undock, or wait for the slot list to arrive.",
+                "Nothing fitted", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        var system = _bot.Cards.System(live.SystemGuid);
+        var ability = system?.AbilityCardGuids
+            .Select(g => _bot.Cards.Ability(g))
+            .FirstOrDefault(a => a is not null);
+
+        if (system is null || ability is null)
+        {
+            MessageBox.Show($"Item {live.SystemGuid} is not in the card cache yet. "
+                          + "Turn on \"Fetch cards\" and give it a moment.",
+                "Not cached", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        void Set(TextField f, float? v) { if (v is > 0 && (overwrite || f.Number is null)) f.Number = v; }
+
+        Set(_max, ability.MaxRange);
+        Set(_optimal, ability.OptimalRange);
+        Set(_min, ability.MinRange);
+        Set(_reload, ability.Cooldown);
+        Set(_power, ability.PowerCost);
+        if (system.Level > 0 && (overwrite || _level.Number is null)) _level.Number = system.Level;
+
+        _category.SelectedItem = system.SlotType;
+
+        // The action type states the role outright — FireMining is a mining laser, ResourceScan
+        // is the scanner, RestoreBuff is the repair. This is the guessing the bot has been doing
+        // from stat shapes, answered by the server instead.
+        var role = RoleFor(ability.EffectiveAction);
+        if (role is { } r && (overwrite || _role.SelectedIndex == 0))
+        {
+            int i = Array.FindIndex(Roles, x => x.Role == r);
+            if (i >= 0) _role.SelectedIndex = i;
+        }
+
+        _wire.ForeColor = Theme.Good;
+        _wire.Text = $"filled from catalogue · {ability.EffectiveAction} · item {live.SystemGuid}";
+    }
+
+    private static WeaponRole? RoleFor(Cards.AbilityActionType a) => a switch
+    {
+        Cards.AbilityActionType.FireMining => WeaponRole.Mining,
+        Cards.AbilityActionType.ResourceScan => WeaponRole.Scanner,
+        Cards.AbilityActionType.RestoreBuff => WeaponRole.Repair,
+        Cards.AbilityActionType.FireCannon or Cards.AbilityActionType.FireMissle or
+        Cards.AbilityActionType.FireTorpedo or Cards.AbilityActionType.FireLightMissile or
+        Cards.AbilityActionType.FireHeavyMissile or Cards.AbilityActionType.FireShotgun or
+        Cards.AbilityActionType.FireKillCannon or Cards.AbilityActionType.FireMachineGun or
+        Cards.AbilityActionType.Flak or Cards.AbilityActionType.PointDefence => WeaponRole.Combat,
+        Cards.AbilityActionType.None => null,
+        _ => WeaponRole.Utility,
+    };
+
     private void TestFire()
     {
         if (SlotIdValue() is not { } id)
@@ -257,7 +355,7 @@ public sealed class SlotEditorDialog : Form
     private ushort? SlotIdValue()
     {
         var n = _slotId.Number;
-        return n is > 0 and <= ushort.MaxValue ? (ushort)n.Value : null;
+        return n is >= 0 and <= ushort.MaxValue ? (ushort)n.Value : null;
     }
 
     /// <summary>
@@ -315,7 +413,7 @@ public sealed class SlotEditorDialog : Form
 
         Result = new SavedSlot
         {
-            SlotId = id ?? 0,
+            SlotId = id ?? -1,        // -1, not 0 — zero is a real ability id on this server
             Hex = _hex,
             Name = _name.Text.Trim(),
             Category = category.ToString(),

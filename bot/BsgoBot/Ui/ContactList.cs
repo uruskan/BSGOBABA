@@ -185,11 +185,23 @@ public sealed class ContactList : Panel
         SyncButtons();
     }
 
-    private void Act(Func<uint, Task> what, string verb)
+    /// <summary>
+    /// Runs one contact action and reports it.
+    ///
+    /// The await matters. These used to be started with <c>_ = what(id)</c>, and the failure
+    /// they most needed to report — no client session, so nothing can be injected — is thrown
+    /// inside the task rather than at the call. A synchronous try/catch never saw it, so with no
+    /// game connected the buttons did nothing at all and said nothing about why.
+    /// </summary>
+    private async void Act(Func<uint, Task> what, string verb)
     {
         uint id = Selected;
         if (id == 0) return;
-        try { _ = what(id); }
+        try
+        {
+            await what(id);
+            Log?.Invoke($"Asked the server to {verb} #{id:X8}.");
+        }
         catch (Exception ex)
         {
             MessageBox.Show($"Could not {verb} #{id:X8}: {ex.Message}\n\n" +
@@ -197,6 +209,9 @@ public sealed class ContactList : Panel
                 "No session", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
     }
+
+    /// <summary>So a contact action leaves a trace — several of them change nothing visible.</summary>
+    public event Action<string>? Log;
 
     /// <summary>Only offer an action that makes sense for what is selected.</summary>
     private void SyncButtons()

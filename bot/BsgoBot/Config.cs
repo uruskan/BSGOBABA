@@ -23,9 +23,20 @@ public sealed class SavedWeapon
 /// </summary>
 public sealed class SavedSlot
 {
-    /// <summary>Slot id, which is also the ability id used to fire it (client:
-    /// ShipAbility.ServerID => slot.ServerID). 0 means the hex isn't bound to a slot yet.</summary>
-    public ushort SlotId { get; set; }
+    /// <summary>
+    /// Slot id, which is also the ability id used to fire it (client: ShipAbility.ServerID =>
+    /// slot.ServerID). <b>-1</b> means the hex isn't bound to a slot yet.
+    ///
+    /// Not 0. Ability ids on this server start at zero — binding a real mining laser by firing
+    /// it captures id 0 — and while 0 was the "unbound" marker that laser could not be bound,
+    /// saved, or test-fired, because every check read it as "nothing here". A sentinel has to be
+    /// a value the data cannot take.
+    /// </summary>
+    public int SlotId { get; set; } = -1;
+
+    /// <summary>True once this hex points at a real ability id.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool Bound => SlotId >= 0;
 
     public string Name { get; set; } = "";
 
@@ -69,6 +80,16 @@ public sealed class ServerProfile
     public string PlayerId { get; set; } = "5085935";
     public string Session { get; set; } = "";
     public string Language { get; set; } = "en";
+
+    /// <summary>
+    /// How many hexes sit above the hull for weapons, which is how many gun slots this ship has.
+    ///
+    /// Stated, not detected: <c>Reply.Slots</c> carries a slot's id, its installed system guid and
+    /// whether it is inoperable, and nothing at all about what KIND of slot it is — that lives in
+    /// the catalogue, which the bot never reads. Hardcoding four numbered a three-gun ship's
+    /// ability bar from 5.
+    /// </summary>
+    public int WeaponHexes { get; set; } = 4;
 
     /// <summary>Weapon ability ids are per-ship and per-server, so they live here.
     /// Hidden from the profiles grid — it's machine state, not something you type in.</summary>
@@ -183,8 +204,30 @@ public sealed class BotSettings
     /// <summary>NPC kinds to hunt, by <c>SpaceEntityType</c> name. Empty means all of them.</summary>
     public List<string> Prey { get; set; } = [];
 
-    /// <summary>Resource to mine, by <c>ResourceType</c> name. "Any" takes whatever is nearest.</summary>
+    /// <summary>
+    /// Ask the server for catalogue cards the bot hasn't seen, rather than only reading the ones
+    /// the client happens to fetch.
+    ///
+    /// Default OFF because it is the only feature that injects traffic the real client never
+    /// asked for, and it is the prime suspect for sessions being dropped. Passive sniffing still
+    /// fills the catalogue from the client's own browsing either way — this only controls whether
+    /// we ASK. Turn it on to test, and if the client starts dropping, turn it back off.
+    /// </summary>
+    public bool FetchCatalogue { get; set; }
+
+    /// <summary>Distance at which a rock is worth half its ore, when choosing which to fly to.
+    /// Lower keeps the ship local; higher lets it range for a big find. At 1000 a rock 2,000u out
+    /// needs 5x the ore to win, and one 5,000u out needs 26x.</summary>
+    public float RockTravelPenalty { get; set; } = 1000f;
+
+    /// <summary>Resource to mine, by <c>ResourceType</c> name. Superseded by
+    /// <see cref="WantedResources"/> and kept only so an existing bot.json still means what it
+    /// meant — it is migrated on load and then left alone.</summary>
     public string WantedResource { get; set; } = "Any";
+
+    /// <summary>Resources to mine, by <c>ResourceType</c> name, BEST FIRST. The order is the
+    /// priority, not just a set. Empty takes whatever is nearest.</summary>
+    public List<string> WantedResources { get; set; } = [];
 }
 
 /// <summary>A game client install. Version is per-build, so it belongs to the client,
@@ -243,7 +286,22 @@ public sealed class Config
         }
 
         cfg.SeedDefaults();
+        cfg.MigrateUnboundSlots();
         return cfg;
+    }
+
+    /// <summary>
+    /// Old profiles stored 0 for "this hex is not bound to anything". Zero is a real ability id,
+    /// so that meaning has to be retired — but the two cases are indistinguishable in the file.
+    /// A hex with a 0 and nothing else typed into it was certainly unbound; one that also
+    /// carries a name or a role was described on purpose and keeps its id.
+    /// </summary>
+    private void MigrateUnboundSlots()
+    {
+        foreach (var server in Servers)
+            foreach (var slot in server.Slots)
+                if (slot.SlotId == 0 && slot.Name.Length == 0 && slot.Role.Length == 0)
+                    slot.SlotId = -1;
     }
 
     /// <summary>Keeps a fresh install (or an old flat bot.json) usable without hand-editing.</summary>

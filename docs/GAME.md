@@ -278,3 +278,42 @@ safe and poor.
 - **Accuracy is flat at or below optimal range**, then falls linearly to `minHitChanceOutsideOpt`
   at max range (`HitchanceBasedOnThrottle.getChanceToHit`). Closing inside optimal gains nothing;
   sitting beyond it loses a lot.
+- **Ability ids start at 0.** Verified on bsgo.fun by binding a fitted mining laser, which
+  reported id 0. Any code using 0 to mean "unset" is broken by that.
+- **A shot needs an arc as well as a range.** `Algorithm3D.isWeaponPositionInRange` measures from
+  the *hardpoint*, not the ship's centre, and rejects anything outside `ObjectStat.Angle` degrees
+  of that hardpoint's forward vector. `Angle = 0` means omnidirectional. The client applies the
+  same test before it will send a cast (`ShipAbility.TargetPositionCheck`).
+- **Avoidance scales with the target's own throttle**: multiplier is
+  `max(throttle / maxSpeed, 1 - avoidanceFading)`, and `Gear.Boost` pins it at full. A stationary
+  ship is the most hittable it will ever be. *(From bsgocore — unverified on bsgo.fun; the bot
+  now measures it directly.)*
+
+---
+
+## 7. Messages the bot reads that carry more than they look like
+
+- **`Reply.CombatInfo` (Game/40)** — `bool dmgIsFromMe, uint32 objectId, float value, byte flags`.
+  `value` is **signed**: negative is damage, positive is a repair. `flags` is `1 = destroyed`,
+  `2 = critical`. Sent for every hit involving you, in either direction. This is exact per-hit
+  telemetry and needs no injected traffic to obtain.
+- **`Reply.WeaponShot` (Game/13)** — `uint32 shooter, uint16 hardpointHash, uint32 target,
+  byte fxType`. Broadcast to every client in the sector, so it covers fights you are not in.
+- **`CatalogueProtocol`** is two messages. Request `1`: `uint16 count`, then that many
+  `uint32 cardGuid, uint16 cardView` pairs. Reply `2`: `uint32 cardGuid, uint16 cardView, body`.
+  One guid answers to several views.
+- **Static card guids** (client `StaticCards`): Colonial ship list `73551268`, Cylon
+  `188756164`, Global `49842157`, GalaxyMap `150576033`.
+- **A ship card and its world card share one guid**, and that guid is the second one in every
+  `WhoIs` (`SpaceObject.BaseRead`'s `objectGUID`). So seeing an object is enough to look up its
+  hull stats, its size and its hardpoint geometry.
+- **`GameItemCard.Read` consumes no bytes.** It only fetches sibling views, so a ship card's body
+  starts immediately at `ShipObjectKey`.
+- **`ReadSet<T>` is a uint16 bitmask**, not a counted list — misreading it desynchronises
+  everything after it.
+- **The server refuses whole categories of card silently.** `CatalogueProtocol.parseMessage` logs
+  its own error and sends nothing, and `shipCardFilter` drops any ship card with
+  `hangarId == -1`, which is what every non-purchasable NPC hull is. A request that will never be
+  answered is indistinguishable from one still in flight, so retries need a cap.
+- **An unknown `CardView` is a deliberate disconnect**: *"CardView was null, therefore kill the
+  connection!"* This protocol drops you for malformed input rather than ignoring it.

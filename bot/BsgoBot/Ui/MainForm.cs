@@ -33,7 +33,7 @@ public sealed class MainForm : Form
     private readonly SessionCatcher _catcher = new();
     private readonly DarkCombo _serverBox = new();
     private readonly DarkCombo _clientBox = new();
-    private readonly DarkCombo _resourceBox = new();
+    private readonly List<ToggleChip> _resourceChips = [];
 
     private readonly ToggleChip _chipCombat = new("Combat", true);
     private readonly ToggleChip _chipMining = new("Mining");
@@ -47,6 +47,7 @@ public sealed class MainForm : Form
     private readonly ToggleChip _chipRepair = new("Self repair");
     private readonly ToggleChip _chipDefend = new("Fight back");
     private readonly ToggleChip _chipAvoidRocks = new("Dodge obstacles");
+    private readonly ToggleChip _chipCatalogue = new("Fetch cards");
     private readonly List<ToggleChip> _preyChips = [];
 
     private NumberField _numRange = null!;
@@ -54,6 +55,8 @@ public sealed class MainForm : Form
     private NumberField _numRock = null!;
     private NumberField _numSpeed = null!;
     private NumberField _numBoost = null!;
+    private NumberField _numKeepOut = null!;
+    private NumberField _numTravel = null!;
 
     private Panel _header = null!;
     private Panel _viewHost = null!;
@@ -108,7 +111,13 @@ public sealed class MainForm : Form
         _map.ContactPicked += id => _contacts.Selected = id;
         _map.ContactActivated += id => { _contacts.Selected = id; _bot.Pin(id); };
         _contacts.SelectionChanged += id => { _map.Selected = id; _map.Invalidate(); };
-        _loadout.Changed += () => { ApplyLoadout(); _cfg.Save(); };
+        _contacts.Log += AppendLog;
+        _loadout.Changed += () =>
+        {
+            if (_cfg.CurrentServer is { } srv) srv.WeaponHexes = _loadout.WeaponHexes;
+            ApplyLoadout();
+            _cfg.Save();
+        };
 
         _proxy.Log += AppendLog;
         _bot.Log += AppendLog;
@@ -172,6 +181,10 @@ public sealed class MainForm : Form
         _bot.Weapons.Restore(s.Weapons.Select(w =>
             ((ushort)w.AbilityId, (WeaponKind)w.Kind, (WeaponRole)w.Role, w.Enabled)));
 
+        // Gun count is per ship, so it travels with the profile. Set before the declarations are
+        // pushed: it decides which hexes count as weapon hexes and how the bar is numbered.
+        _loadout.WeaponHexes = s.WeaponHexes;
+
         // After Restore, not before: what you declared outranks what was merely remembered.
         ApplyLoadout();
     }
@@ -189,13 +202,13 @@ public sealed class MainForm : Form
         if (s is null) return;
 
         _bot.Weapons.SyncDeclarations(s.Slots
-            .Where(d => d.SlotId != 0)           // a labelled hex with nothing behind it
+            .Where(d => d.Bound)           // a labelled hex with nothing behind it
             .Select(d =>
             {
                 Enum.TryParse<ShipSlotType>(d.Category, true, out var category);
                 WeaponRole? role = Enum.TryParse<WeaponRole>(d.Role, true, out var r) ? r : null;
                 return new SlotDeclaration(
-                    d.SlotId, d.Name, category, d.Level, role,
+                    (ushort)d.SlotId, d.Name, category, d.Level, role,
                     d.MaxRange, d.OptimalRange, d.MinRange, d.Cooldown, d.PowerCost,
                     d.Ammo, d.Enabled);
             })
@@ -228,6 +241,8 @@ public sealed class MainForm : Form
         _bot.BoostSpeedOverride = b.BoostSpeedOverride;
         _bot.AvoidCollisions = b.AvoidCollisions;
         _bot.CollisionMargin = b.CollisionMargin;
+        _bot.RockTravelPenalty = b.RockTravelPenalty;
+        _bot.FetchCatalogue = b.FetchCatalogue;
         _bot.AsteroidStandoff = b.AsteroidStandoff;
         _bot.PlanetoidStandoff = b.PlanetoidStandoff;
         _bot.FollowDistance = b.FollowDistance;
@@ -253,8 +268,43 @@ public sealed class MainForm : Form
         foreach (var name in b.Prey)
             if (Enum.TryParse<SpaceEntityType>(name, out var t)) _bot.Prey.Add(t);
 
-        _bot.WantedResource = Enum.TryParse<ResourceType>(b.WantedResource, out var res)
-            ? res : ResourceType.Any;
+        // Migration: an existing bot.json only ever held one resource. Promote it to a one-entry
+        // priority list the first time, so the setting the user picked keeps meaning what it did.
+        if (b.WantedResources.Count == 0
+            && Enum.TryParse<ResourceType>(b.WantedResource, out var legacy)
+            && legacy != ResourceType.Any)
+        {
+            b.WantedResources = [legacy.ToString()];
+        }
+
+        // Filtered against what a rock can actually hold: an earlier build offered cubits,
+        // uranium and plutonium, so a saved list can still rank things that will never match.
+        // Left in place they would occupy priority slots above resources that do exist.
+        _bot.WantedResources.Clear();
+        foreach (var name in b.WantedResources)
+            if (Enum.TryParse<ResourceType>(name, out var r) && Resources.IsMinable(r))
+                _bot.WantedResources.Add(r);
+
+        b.WantedResources = _bot.WantedResources.Select(r => r.ToString()).ToList();
+    }
+
+    /// <summary>
+    /// Rebuilds the mining filter from the chips, preserving the order they were switched ON —
+    /// that order is the priority, so it cannot be re-derived from the chip layout.
+    /// </summary>
+    private void ApplyResources()
+    {
+        _cfg.Bot.WantedResources = _bot.WantedResources.Select(r => r.ToString()).ToList();
+        foreach (var chip in _resourceChips) RankChip(chip);
+    }
+
+    /// <summary>Shows a chip's place in the priority order, because "first picked wins" is
+    /// invisible otherwise.</summary>
+    private void RankChip(ToggleChip chip)
+    {
+        if (chip.Tag2 is not ResourceType r) return;
+        int rank = _bot.WantedResources.IndexOf(r);
+        chip.Text = rank >= 0 ? $"{rank + 1}. {r}" : r.ToString();
     }
 
     private void ApplyPrey()
@@ -460,6 +510,13 @@ public sealed class MainForm : Form
         _chipAvoidRocks.CheckedChanged += (_, _) =>
             _bot.AvoidCollisions = _cfg.Bot.AvoidCollisions = _chipAvoidRocks.Checked;
 
+        // Warn-tinted: this is the one switch that puts traffic on the wire the real client never
+        // sent, so it is the one to turn off first if the session starts dropping.
+        _chipCatalogue.Tint = Theme.Warn;
+        _chipCatalogue.Checked = _cfg.Bot.FetchCatalogue;
+        _chipCatalogue.CheckedChanged += (_, _) =>
+            _bot.FetchCatalogue = _cfg.Bot.FetchCatalogue = _chipCatalogue.Checked;
+
         // A break after the mode pair keeps "what am I doing" visually apart from "how".
         var brk = new Panel { Width = 10_000, Height = 1, BackColor = Theme.Card, Margin = new Padding(0, 3, 0, 5) };
 
@@ -467,7 +524,7 @@ public sealed class MainForm : Form
                  {
                      _chipCombat, _chipMining, brk as Control, _chipApproach, _chipBoost, _chipLoot,
                      _chipGunsOnRocks, _chipOptimal, _chipRepair, _chipAvoidRocks, _chipAvoidStations,
-                     _chipDefend, _chipPlayers,
+                     _chipDefend, _chipPlayers, _chipCatalogue,
                  })
         {
             if (chip is ToggleChip c) c.Margin = new Padding(0, 0, 5, 5);
@@ -479,6 +536,44 @@ public sealed class MainForm : Form
     }
 
     /// <summary>The numbers. Caption left, field right, one per row — readable at rail width.</summary>
+    /// <summary>
+    /// One chip per mineable resource. Switching one on appends it to the priority list, so the
+    /// order you click is the order the bot prefers — nothing selected means "whatever is
+    /// nearest", which is what the old "Any" entry meant.
+    /// </summary>
+    private Control BuildResourceChips()
+    {
+        var flow = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            BackColor = Theme.Card,
+            Margin = Padding.Empty,
+            WrapContents = true,
+            AutoScroll = false,
+        };
+
+        // Only what a rock can actually hold. Absence of any pick is what "Any" used to mean.
+        foreach (var rt in Resources.Minable)
+        {
+            var chip = new ToggleChip(rt.ToString(), _bot.WantedResources.Contains(rt))
+            {
+                Tag2 = rt,
+                Margin = new Padding(0, 0, 4, 4),
+            };
+            chip.CheckedChanged += (_, _) =>
+            {
+                if (chip.Checked) { if (!_bot.WantedResources.Contains(rt)) _bot.WantedResources.Add(rt); }
+                else _bot.WantedResources.Remove(rt);
+                ApplyResources();
+            };
+            _resourceChips.Add(chip);
+            flow.Controls.Add(chip);
+        }
+
+        foreach (var chip in _resourceChips) RankChip(chip);
+        return flow;
+    }
+
     private Control BuildTuningCard()
     {
         var card = new Card("Tuning") { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 8) };
@@ -506,20 +601,29 @@ public sealed class MainForm : Form
         _numBoost.ValueChanged += (_, _) =>
             _bot.BoostSpeedOverride = _cfg.Bot.BoostSpeedOverride = _numBoost.Value;
 
-        foreach (var rt in Enum.GetValues<ResourceType>()) _resourceBox.Items.Add(rt);
-        _resourceBox.SelectedItem = _bot.WantedResource;
-        _resourceBox.SelectedIndexChanged += (_, _) =>
-        {
-            var pick = (ResourceType)(_resourceBox.SelectedItem ?? ResourceType.Any);
-            _bot.WantedResource = pick;
-            _cfg.Bot.WantedResource = pick.ToString();
-        };
+
+        // Guessed, never published — the server states no reach for an emplacement, so this is
+        // the one number you genuinely have to tune by being shot at. Live, not via bot.json.
+        _numKeepOut = new NumberField(0, 20000, 100, (int)_cfg.Bot.HostileStationKeepOut, "u");
+        _numKeepOut.ValueChanged += (_, _) =>
+            _bot.HostileStationKeepOut = _cfg.Bot.HostileStationKeepOut = _numKeepOut.Value;
+
+        // How far the ship will range for a richer rock. Squared falloff, so this is the distance
+        // at which a rock counts for half its ore — small changes here move the behaviour a lot.
+        _numTravel = new NumberField(100, 20000, 50, (int)_cfg.Bot.RockTravelPenalty, "u");
+        _numTravel.ValueChanged += (_, _) =>
+            _bot.RockTravelPenalty = _cfg.Bot.RockTravelPenalty = _numTravel.Value;
 
         card.Controls.Add(Rows(2,
-            [30, 30, 30, 30, 30, 30],
-            (RailCaption("MINE"), 1), (_resourceBox, 1),
+            // The chip row must fit ALL of them, or the last is silently clipped off the bottom.
+            // Three resources at two per rail-width is two rows of 30, with room for a fourth.
+            [18, 62, 30, 30, 30, 30, 30, 30, 30],
+            (RailCaption("MINE  (click in priority order)"), 2),
+            (BuildResourceChips(), 2),
             (RailCaption("RETREAT AT HULL"), 1), (_numRetreat, 1),
+            (RailCaption("STAY WITHIN"), 1), (_numTravel, 1),
             (RailCaption("HOLD OFF ROCK"), 1), (_numRock, 1),
+            (RailCaption("KEEP OFF GUNS"), 1), (_numKeepOut, 1),
             (RailCaption("CRUISE SPEED"), 1), (_numSpeed, 1),
             (RailCaption("BOOST SPEED"), 1), (_numBoost, 1),
             (RailCaption("FALLBACK REACH"), 1), (_numRange, 1)));
@@ -685,7 +789,10 @@ public sealed class MainForm : Form
         };
         rail.RowStyles.Add(new RowStyle(SizeType.Absolute, 306));  // connection
         rail.RowStyles.Add(new RowStyle(SizeType.Absolute, 268));  // control
-        rail.RowStyles.Add(new RowStyle(SizeType.Absolute, 170));  // tuning
+        // Must match BuildTuningCard's row heights (18 + 62 + seven 30s) plus the card's own 40px
+        // of chrome. Rows were added here before without this growing, which silently clipped the
+        // last of them off the bottom of the panel.
+        rail.RowStyles.Add(new RowStyle(SizeType.Absolute, 18 + 62 + 7 * 30 + 40));  // tuning
         rail.RowStyles.Add(new RowStyle(SizeType.Percent, 100));   // slack, so nothing stretches
 
         rail.Controls.Add(BuildConnectionCard(), 0, 0);
@@ -1116,8 +1223,39 @@ public sealed class MainForm : Form
 
     private void AppendLog(string message)
     {
+        // Written once, on the calling thread. The marshalling hop below goes straight to
+        // _log.Add rather than back through this method — re-entering it wrote every
+        // background-thread message to the file twice.
+        WriteLogFile(message);
+
         if (IsDisposed) return;
-        if (InvokeRequired) { try { BeginInvoke(() => AppendLog(message)); } catch { } return; }
+        if (InvokeRequired) { try { BeginInvoke(() => _log.Add(message)); } catch { } return; }
         _log.Add(message);
+    }
+
+    private static readonly Lock _logFileGate = new();
+    private static string? _logFilePath;
+
+    /// <summary>
+    /// Appends one line to today's log file, and never throws: a logger that can take the
+    /// application down with it is worse than no logger.
+    /// </summary>
+    private static void WriteLogFile(string message)
+    {
+        try
+        {
+            lock (_logFileGate)
+            {
+                if (_logFilePath is null)
+                {
+                    var dir = Path.Combine(AppContext.BaseDirectory, "logs");
+                    Directory.CreateDirectory(dir);
+                    _logFilePath = Path.Combine(dir, $"bot-{DateTime.Now:yyyy-MM-dd}.log");
+                }
+                File.AppendAllText(_logFilePath,
+                    $"{DateTime.Now:HH:mm:ss.fff}  {message}{Environment.NewLine}");
+            }
+        }
+        catch { /* a full or read-only disk is not worth a crash */ }
     }
 }

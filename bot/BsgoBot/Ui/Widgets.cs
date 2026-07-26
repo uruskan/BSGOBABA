@@ -1,4 +1,4 @@
-using System.ComponentModel;
+﻿using System.ComponentModel;
 using System.Diagnostics.CodeAnalysis;
 using System.Drawing.Drawing2D;
 
@@ -376,7 +376,7 @@ public sealed class TextField : Control
         set { _box.Text = value ?? ""; Invalidate(); }
     }
 
-    /// <summary>The text as a number, or null when it is blank or unparsable — which is exactly
+    /// <summary>The text as a number, or null when it is blank or unparsable â€” which is exactly
     /// the distinction the slot editor needs between "50 power" and "I didn't say".</summary>
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public float? Number
@@ -512,40 +512,117 @@ public sealed class StatList : Control
 }
 
 /// <summary>Scrolling event log with severity colouring and no 1990s border.</summary>
+/// <summary>
+/// The activity log.
+///
+/// Built on a real text control rather than a custom-painted one, for a single reason: the
+/// custom version could not be selected or copied. That made it useless for the job a log
+/// exists to do â€” handing a failure to somebody who can act on it â€” and left screenshotting as
+/// the only way to get a line out of it.
+///
+/// The per-line colouring survives, because that is genuinely useful for finding a failure at a
+/// glance, and a RichTextBox can colour each line as it is appended.
+/// </summary>
 public sealed class LogView : Control
 {
-    private readonly List<(DateTime At, string Text, Color Colour)> _lines = [];
+    private readonly RichTextBox _box = new();
     private readonly Lock _gate = new();
-    private readonly VScrollBar _scroll = new();
-    private int _top;
+    private int _lineCount;
 
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
-    public int LineHeight { get; set; } = 15;
-    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
-    public int Capacity { get; set; } = 500;
+    public int Capacity { get; set; } = 2000;
 
     public LogView()
     {
-        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
-                 ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
         BackColor = Theme.Bg;
+        Padding = new Padding(6, 4, 2, 2);
 
-        _scroll.Dock = DockStyle.Right;
-        _scroll.Width = 10;
-        _scroll.Scroll += (_, _) => { _top = _scroll.Value; Invalidate(); };
-        Controls.Add(_scroll);
+        _box.Dock = DockStyle.Fill;
+        _box.BorderStyle = BorderStyle.None;
+        _box.BackColor = Theme.Bg;
+        _box.ForeColor = Theme.Muted;
+        _box.Font = Theme.MonoSmall;
+        _box.ReadOnly = true;
+        _box.WordWrap = false;
+        _box.ScrollBars = RichTextBoxScrollBars.Both;
+        _box.DetectUrls = false;
+        // Read-only, but still focusable and selectable â€” that is the whole point. The caret is
+        // hidden so it does not look editable.
+        _box.HideSelection = false;
+        _box.ShortcutsEnabled = true;
+
+        var menu = new ContextMenuStrip();
+        menu.Items.Add("Copy selection", null, (_, _) => { if (_box.SelectionLength > 0) _box.Copy(); });
+        menu.Items.Add("Copy all", null, (_, _) => CopyAll());
+        menu.Items.Add("Select all", null, (_, _) => { _box.Focus(); _box.SelectAll(); });
+        menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add("Clear", null, (_, _) => Clear());
+        _box.ContextMenuStrip = menu;
+
+        Controls.Add(_box);
     }
 
     public void Add(string text)
     {
-        var colour = Classify(text);
+        if (IsDisposed || _box.IsDisposed) return;
+        if (InvokeRequired) { try { BeginInvoke(() => Add(text)); } catch { } return; }
+
         lock (_gate)
         {
-            _lines.Add((DateTime.Now, text, colour));
-            while (_lines.Count > Capacity) _lines.RemoveAt(0);
+            // Trim from the top when full. Done in whole lines so a half-line never survives.
+            if (_lineCount >= Capacity)
+            {
+                int cut = _box.GetFirstCharIndexFromLine(Capacity / 4);
+                if (cut > 0)
+                {
+                    _box.Select(0, cut);
+                    _box.SelectedText = "";
+                    _lineCount = _box.Lines.Length;
+                }
+            }
+
+            // Appending while the user has a selection would destroy it mid-copy, so the
+            // selection is put back afterwards unless they are parked at the end.
+            int selStart = _box.SelectionStart;
+            int selLen = _box.SelectionLength;
+            bool atEnd = selLen == 0 && selStart >= _box.TextLength - 1;
+
+            _box.SelectionStart = _box.TextLength;
+            _box.SelectionLength = 0;
+
+            _box.SelectionColor = Theme.Faint;
+            _box.AppendText($"{DateTime.Now:HH:mm:ss}  ");
+            _box.SelectionColor = Classify(text);
+            _box.AppendText(text + Environment.NewLine);
+            _lineCount++;
+
+            if (atEnd)
+            {
+                _box.SelectionStart = _box.TextLength;
+                _box.ScrollToCaret();
+            }
+            else
+            {
+                _box.SelectionStart = selStart;
+                _box.SelectionLength = selLen;
+            }
         }
-        ScrollToEnd();
-        Invalidate();
+    }
+
+    public void Clear()
+    {
+        lock (_gate) { _box.Clear(); _lineCount = 0; }
+    }
+
+    /// <summary>Everything currently buffered, as plain text.</summary>
+    public string AllText() => _box.Text;
+
+    public void CopyAll()
+    {
+        var text = AllText();
+        // Clipboard.SetText throws on an empty string rather than doing nothing.
+        if (string.IsNullOrEmpty(text)) return;
+        try { Clipboard.SetText(text); } catch { /* another app can hold the clipboard open */ }
     }
 
     /// <summary>Colour by what the line means, so a failure is findable at a glance.</summary>
@@ -554,6 +631,8 @@ public sealed class LogView : Control
         if (t.Contains("WARNING", StringComparison.OrdinalIgnoreCase) ||
             t.Contains("failed", StringComparison.OrdinalIgnoreCase) ||
             t.Contains("rejected", StringComparison.OrdinalIgnoreCase) ||
+            t.Contains("not casting", StringComparison.OrdinalIgnoreCase) ||
+            t.Contains("Session ended", StringComparison.OrdinalIgnoreCase) ||
             t.Contains("could not", StringComparison.OrdinalIgnoreCase)) return Theme.Bad;
 
         if (t.Contains("Learned", StringComparison.OrdinalIgnoreCase) ||
@@ -566,67 +645,6 @@ public sealed class LogView : Control
             t.Contains("Taking", StringComparison.OrdinalIgnoreCase)) return Theme.Accent;
 
         return Theme.Muted;
-    }
-
-    private int VisibleLines => Math.Max(1, (Height - 8) / LineHeight);
-
-    private void ScrollToEnd()
-    {
-        lock (_gate)
-        {
-            int max = Math.Max(0, _lines.Count - VisibleLines);
-            _top = max;
-            if (IsHandleCreated) BeginInvoke(SyncScroll);
-        }
-    }
-
-    private void SyncScroll()
-    {
-        int count;
-        lock (_gate) count = _lines.Count;
-        int max = Math.Max(0, count - VisibleLines);
-        _scroll.Maximum = Math.Max(0, count - 1);
-        _scroll.LargeChange = Math.Max(1, VisibleLines);
-        _scroll.Value = Math.Clamp(_top, 0, Math.Max(0, _scroll.Maximum));
-        _scroll.Visible = max > 0;
-    }
-
-    protected override void OnMouseWheel(MouseEventArgs e)
-    {
-        base.OnMouseWheel(e);
-        int count;
-        lock (_gate) count = _lines.Count;
-        _top = Math.Clamp(_top - Math.Sign(e.Delta) * 3, 0, Math.Max(0, count - VisibleLines));
-        SyncScroll();
-        Invalidate();
-    }
-
-    protected override void OnResize(EventArgs e) { base.OnResize(e); SyncScroll(); }
-
-    protected override void OnPaint(PaintEventArgs e)
-    {
-        var g = e.Graphics;
-        g.Clear(Theme.Bg);
-
-        using var divider = new Pen(Theme.Border);
-        g.DrawLine(divider, 0, 0, Width, 0);
-
-        (DateTime At, string Text, Color Colour)[] snapshot;
-        lock (_gate) snapshot = _lines.Skip(_top).Take(VisibleLines).ToArray();
-
-        int y = 4;
-        foreach (var (at, text, colour) in snapshot)
-        {
-            TextRenderer.DrawText(g, at.ToString("HH:mm:ss"), Theme.MonoSmall,
-                new Rectangle(10, y, 60, LineHeight), Theme.Faint,
-                TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
-
-            TextRenderer.DrawText(g, text, Theme.MonoSmall,
-                new Rectangle(74, y, Width - 90, LineHeight), colour,
-                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
-
-            y += LineHeight;
-        }
     }
 }
 

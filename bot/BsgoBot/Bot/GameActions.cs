@@ -168,4 +168,28 @@ public sealed class GameActions(GameProxy proxy)
         w.Write(objectId);
         return proxy.InjectAsync(w);
     }
+
+    /// <summary>
+    /// Asks the server for catalogue cards.
+    ///
+    /// Shaped exactly like the client's <c>CatalogueProtocol.UpdateMessage</c>: a uint16 total
+    /// count followed by that many <c>guid, view</c> pairs — note the count is of pairs, and the
+    /// client flattens its guid-to-views map into the same flat list.
+    ///
+    /// The reply is delivered to the session, so the real client receives cards it never asked
+    /// for. That is harmless — its <c>ParseMessage</c> loads any incoming card straight into its
+    /// own cache — but it is the reason to keep batches modest rather than requesting the whole
+    /// catalogue in one burst.
+    /// </summary>
+    public Task RequestCards(IReadOnlyList<Cards.CardKey> cards)
+    {
+        var w = new BgoWriter((byte)ProtocolId.Catalogue, (ushort)Cards.CatalogueOp.Request.Card);
+        w.Write((ushort)cards.Count);
+        foreach (var c in cards)
+        {
+            w.Write(c.Guid);
+            w.Write((ushort)c.View);
+        }
+        return proxy.InjectAsync(w);
+    }
 }

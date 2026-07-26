@@ -115,17 +115,42 @@ public sealed class Weapon
     public float? StatCooldown { get; set; }
     public float? StatPowerCost { get; set; }
 
+    // The catalogue tier. Resolved from slot → fitted system → ability card, and the ability's
+    // ItemBuffAdd is the very block the server reads to decide whether a shot is in range and
+    // what it costs. So this is not a better guess than yours — it is the same authority as the
+    // stat stream, available on servers that never send one.
+    //
+    // It sits above what you typed for exactly that reason, and below the live stats because
+    // buffs and modules can move the real numbers away from the printed card.
+
+    public float? CardMaxRange { get; set; }
+    public float? CardMinRange { get; set; }
+    public float? CardOptimalRange { get; set; }
+    public float? CardCooldown { get; set; }
+    public float? CardPowerCost { get; set; }
+
+    /// <summary>Firing arc half-angle in degrees; 0 means omnidirectional. Catalogue only — the
+    /// stat stream carries it too, but nothing has ever published one here.</summary>
+    public float? CardAngle { get; set; }
+
     public float? UserMaxRange { get; set; }
     public float? UserMinRange { get; set; }
     public float? UserOptimalRange { get; set; }
     public float? UserCooldown { get; set; }
     public float? UserPowerCost { get; set; }
 
-    public float? MaxRange => StatMaxRange ?? UserMaxRange;
-    public float? MinRange => StatMinRange ?? UserMinRange;
-    public float? OptimalRange => StatOptimalRange ?? UserOptimalRange;
-    public float? Cooldown => StatCooldown ?? UserCooldown;
-    public float? PowerCost => StatPowerCost ?? UserPowerCost;
+    public float? MaxRange => StatMaxRange ?? CardMaxRange ?? UserMaxRange;
+    public float? MinRange => StatMinRange ?? CardMinRange ?? UserMinRange;
+    public float? OptimalRange => StatOptimalRange ?? CardOptimalRange ?? UserOptimalRange;
+    public float? Cooldown => StatCooldown ?? CardCooldown ?? UserCooldown;
+    public float? PowerCost => StatPowerCost ?? CardPowerCost ?? UserPowerCost;
+
+    /// <summary>Where the reach in force came from, for the panel and the log.</summary>
+    public string RangeSource =>
+        StatMaxRange is not null ? "server stats"
+        : CardMaxRange is not null ? "catalogue"
+        : UserMaxRange is not null ? "you"
+        : "unknown";
 
     /// <summary>True when every number in force came from you, i.e. the server published none.</summary>
     public bool NumbersAreYours =>
@@ -194,14 +219,34 @@ public sealed class WeaponBook
     /// never towards <see cref="WeaponRole.Scanner"/> or <see cref="WeaponRole.Utility"/>, which
     /// hold only what the server told us.
     /// </summary>
+    /// <summary>
+    /// The abilities to fire for a given job.
+    ///
+    /// An <see cref="WeaponRole.Unknown"/> ability — one we have only ever watched you fire, with
+    /// no role attached — counts as a weapon <b>only while you have not described your loadout</b>.
+    /// That fallback exists so a fresh profile can still shoot something; it is not a licence to
+    /// keep firing ids left over from another ship.
+    ///
+    /// It had become exactly that. Ability ids persist in <c>bot.json</c> across refits, so the
+    /// book accumulated a dozen roleless ids and fired every one of them at every target. On a
+    /// hull where those ids are real slots holding an engine or an armour plate, that is a cast
+    /// the server has no sensible answer to — and the connection dropped seconds after each
+    /// volley. Once you have declared even one slot, the declaration is the list.
+    /// </summary>
     public List<Weapon> For(WeaponRole role)
     {
         bool shooting = role is WeaponRole.Combat or WeaponRole.Mining;
         lock (_gate)
+        {
+            bool anyDeclared = _weapons.Values.Any(w => w.RoleFromUser);
+            bool guessAllowed = shooting && !anyDeclared;
+
             return _weapons.Values
-                .Where(w => w.Enabled && (w.Role == role || (w.Role == WeaponRole.Unknown && shooting)))
+                .Where(w => w.Enabled &&
+                            (w.Role == role || (w.Role == WeaponRole.Unknown && guessAllowed)))
                 .OrderBy(w => w.AbilityId)
                 .ToList();
+        }
     }
 
     /// <summary>
@@ -434,6 +479,89 @@ public sealed class WeaponBook
     /// but it also meant the scanner never appeared in the book at all, and the probe that
     /// hunts for it had an empty list to search.
     /// </summary>
+    /// <summary>
+    /// Fills every weapon's numbers from the server's own catalogue.
+    ///
+    /// The chain is <c>slot id → fitted system guid → ShipSystem card → ShipAbility card</c>, and
+    /// it needs nothing from you: the slot list says what is fitted, and the cards say what it
+    /// does. Ranges, reload, power cost, firing arc and the role all arrive together.
+    ///
+    /// This is what makes the typed-in numbers optional and <c>FallbackRange</c> nearly dead. It
+    /// only ever adds to the card tier, so a live stat still wins and anything you typed is still
+    /// there underneath as a last resort.
+    /// </summary>
+    public int RefreshFromCatalogue(WorldState world, Cards.CatalogueSpy cards)
+    {
+        int learned = 0;
+
+        foreach (var slot in world.MySlots())
+        {
+            if (!slot.Filled) continue;
+
+            var system = cards.System(slot.SystemGuid);
+            if (system is null) continue;
+
+            var ability = system.AbilityCardGuids
+                .Select(cards.Ability)
+                .FirstOrDefault(a => a is not null);
+            if (ability is null) continue;
+
+            lock (_gate)
+            {
+                if (!_weapons.TryGetValue(slot.SlotId, out var w))
+                {
+                    w = new Weapon
+                    {
+                        AbilityId = slot.SlotId,
+                        Kind = WeaponKind.Cast,
+                        Source = "the catalogue",
+                    };
+                    _weapons[slot.SlotId] = w;
+                    learned++;
+                }
+
+                w.CardMaxRange = Positive(ability.MaxRange);
+                w.CardMinRange = ability.MinRange;          // 0 is a real minimum, keep it
+                w.CardOptimalRange = Positive(ability.OptimalRange);
+                w.CardCooldown = Positive(ability.Cooldown);
+                w.CardPowerCost = Positive(ability.PowerCost);
+                w.CardAngle = ability.Angle;
+
+                // What it IS, stated rather than inferred from the shape of its stats. Yours
+                // still wins — RoleFromUser is the top of the chain and this must not disturb it.
+                if (!w.RoleFromUser && RoleForAction(ability.EffectiveAction) is { } role
+                    && w.Role != role)
+                {
+                    w.Role = role;
+                    w.RoleFromStats = true;
+                }
+
+                // Affect is stated on the card, so the area/single question no longer needs
+                // proving by experiment.
+                w.Area ??= ability.Affect == Cards.ShipAbilityAffect.Area;
+            }
+        }
+
+        return learned;
+    }
+
+    private static float? Positive(float? v) => v is > 0 ? v : null;
+
+    /// <summary>Maps the server's own action type onto what the bot does with a slot.</summary>
+    private static WeaponRole? RoleForAction(Cards.AbilityActionType a) => a switch
+    {
+        Cards.AbilityActionType.FireMining => WeaponRole.Mining,
+        Cards.AbilityActionType.ResourceScan => WeaponRole.Scanner,
+        Cards.AbilityActionType.RestoreBuff => WeaponRole.Repair,
+        Cards.AbilityActionType.FireCannon or Cards.AbilityActionType.FireMissle or
+        Cards.AbilityActionType.FireTorpedo or Cards.AbilityActionType.FireLightMissile or
+        Cards.AbilityActionType.FireHeavyMissile or Cards.AbilityActionType.FireShotgun or
+        Cards.AbilityActionType.FireKillCannon or Cards.AbilityActionType.FireMachineGun or
+        Cards.AbilityActionType.Flak or Cards.AbilityActionType.PointDefence => WeaponRole.Combat,
+        Cards.AbilityActionType.None => null,
+        _ => WeaponRole.Utility,
+    };
+
     public void RefreshFromStats(WorldState world)
     {
         foreach (var slot in world.KnownSlots())

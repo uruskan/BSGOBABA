@@ -4,6 +4,31 @@ using BsgoBot.Protocol;
 
 namespace BsgoBot.World;
 
+/// <summary>
+/// One weapon discharge, from <c>Reply.WeaponShot</c>. <see cref="Target"/> is 0 when the shot
+/// was aimed at nothing in particular.
+/// </summary>
+public readonly record struct ShotEvent(
+    uint Shooter, ushort HardpointHash, uint Target, byte FxType, DateTime At);
+
+/// <summary>
+/// One hit involving us, from <c>Reply.CombatInfo</c>.
+///
+/// <see cref="Value"/> is signed exactly as the server sent it: <b>negative is damage, positive
+/// is a repair</b> — the client branches on the sign to pick its log line. <see cref="FromMe"/>
+/// separates damage we dealt from damage we took, and <see cref="Other"/> is the far end in
+/// either direction.
+/// </summary>
+public readonly record struct CombatEvent(
+    bool FromMe, uint Other, float Value, bool Destroyed, bool Critical, DateTime At)
+{
+    public bool IsDamage => Value < 0f;
+    public bool IsRepair => Value > 0f;
+
+    /// <summary>Magnitude with the sign removed — what you actually add up.</summary>
+    public float Amount => Math.Abs(Value);
+}
+
 public sealed class SpaceObj
 {
     public uint Id;
@@ -30,6 +55,19 @@ public sealed class SpaceObj
     public uint PlayerId;              // player ships only
     public uint OwnerObjectId;         // missiles, mines
     public CargoInteraction CargoAction;
+
+    /// <summary>
+    /// The catalogue guid of what this object *is* — its model. From WhoIs's second guid
+    /// (SpaceObject.BaseRead's objectGUID, the WorldCard guid).
+    ///
+    /// One guid, several views: the same number answers to CardView.Ship for stats and slots and
+    /// to CardView.World for size and hardpoints. Two ships of the same class share it, which is
+    /// what makes it the right key for anything learned about a class rather than an individual.
+    /// </summary>
+    public uint CardGuid;
+
+    /// <summary>The guid of the owner card — faction/allegiance flavour, not the model.</summary>
+    public uint OwnerCardGuid;
 
     // Reply.Info / Reply.Stats — only arrives for objects we (or the client) subscribed to.
     public bool StatsKnown;
@@ -160,6 +198,21 @@ public sealed class WorldState
     /// pick up a refit without polling.</summary>
     public event Action? LoadoutChanged;
 
+    /// <summary>
+    /// Raised on every WhoIs that names a model: <c>(objectId, cardGuid, type)</c>.
+    ///
+    /// This is the hook the catalogue spy hangs on. A WhoIs arrives as soon as an object enters
+    /// dradis range, which is long before it is a threat — so the card for a hull can be
+    /// fetched and read while it is still a dot on the map.
+    /// </summary>
+    public event Action<uint, uint, SpaceEntityType>? ObjectIdentified;
+
+    /// <summary>Every weapon discharge in the sector, ours and everyone else's.</summary>
+    public event Action<ShotEvent>? ShotSeen;
+
+    /// <summary>Every point of damage or repair we dealt or received, per hit.</summary>
+    public event Action<CombatEvent>? CombatSeen;
+
     public event Action<string>? Log;
 
     public List<SpaceObj> Snapshot()
@@ -178,7 +231,7 @@ public sealed class WorldState
         Position = o.Position, Velocity = o.Velocity, HasPosition = o.HasPosition,
         LastSeen = o.LastSeen, PositionStamp = o.PositionStamp,
         Radius = o.Radius, PlayerId = o.PlayerId, OwnerObjectId = o.OwnerObjectId,
-        CargoAction = o.CargoAction,
+        CargoAction = o.CargoAction, CardGuid = o.CardGuid, OwnerCardGuid = o.OwnerCardGuid,
         StatsKnown = o.StatsKnown, Hull = o.Hull, Power = o.Power, Vital = o.Vital,
         InCombat = o.InCombat, TargetId = o.TargetId, Cloaked = o.Cloaked,
         Scanned = o.Scanned, IsMinable = o.IsMinable,
@@ -242,10 +295,43 @@ public sealed class WorldState
         {
             lock (_gate)
             {
-                if (MyShipId != 0 && _hangar.TryGetValue(MyShipId, out var mine)) return mine;
+                // The id match is still preferred, but only when the entry it names actually
+                // describes something. Reply.AddShip creates a hangar entry per ship you own,
+                // and Reply.Slots is not necessarily keyed by the same number Reply.ActiveShip
+                // uses — so the id can match an entry that has no slots at all while the real
+                // list sits under a different key. Reporting that empty entry as "your loadout"
+                // is how every slot came back unfilled, which then made CastAllowed refuse to
+                // fire the mining lasers.
+                if (MyShipId != 0 && _hangar.TryGetValue(MyShipId, out var mine)
+                    && mine.Slots().Any(s => s.Filled))
+                    return mine;
+
+                // Otherwise take the entry that carries the most fitted slots. A ship with
+                // hardware in it is a far better guess at "the one I am flying" than a ship
+                // with none, whatever the ids say.
+                var best = _hangar.Values
+                    .OrderByDescending(h => h.Slots().Count(s => s.Filled))
+                    .ThenByDescending(h => h.Count)
+                    .FirstOrDefault();
+
+                if (best is not null && best.Slots().Any(s => s.Filled)) return best;
+
+                // Nothing anywhere has a fitted slot. Fall back to the old rules so a server
+                // that genuinely reports empty slots still produces a list to look at.
+                if (MyShipId != 0 && _hangar.TryGetValue(MyShipId, out var named)) return named;
                 return _hangar.Count == 1 ? _hangar.Values.First() : null;
             }
         }
+    }
+
+    /// <summary>Every hangar entry and how much of it is filled — for diagnosing which ship the
+    /// slot list actually landed under.</summary>
+    public IReadOnlyList<(ushort ShipId, int Slots, int Filled)> HangarSummary()
+    {
+        lock (_gate)
+            return _hangar.Values
+                .Select(h => (h.ShipId, h.Count, h.Slots().Count(s => s.Filled)))
+                .ToList();
     }
 
     /// <summary>Slots of the ship I am flying. Empty rather than null, so callers can just loop.</summary>
@@ -497,11 +583,35 @@ public sealed class WorldState
 
             case GameOp.Reply.WeaponShot:
             {
+                // Broadcast to every client in the sector, not just the participants — so this
+                // is a free, sector-wide record of who is shooting whom, including fights we
+                // are not in. It is the closest thing on the wire to the server's own aggro
+                // table, which is what NPC target selection actually runs on.
                 uint shooter = r.ReadUInt32();
-                r.ReadUInt16();                       // objectPointHash
+                ushort hardpoint = r.ReadUInt16();
                 uint target = r.ReadUInt32();
+                byte fx = r.HasMore ? r.ReadByte() : (byte)0;   // WeaponFxType
                 Touch(shooter);
                 if (target != 0) Touch(target);
+                ShotSeen?.Invoke(new ShotEvent(shooter, hardpoint, target, fx, DateTime.UtcNow));
+                break;
+            }
+
+            case GameOp.Reply.CombatInfo:
+            {
+                // Client: GameProtocol.Reply.CombatInfo. The float is SIGNED — negative is
+                // damage, positive is a repair — and only ever concerns us: either we dealt it
+                // or we took it. `fromMe` says which.
+                bool fromMe = r.ReadBoolean();
+                uint other = r.ReadUInt32();
+                float value = r.ReadSingle();
+                byte flags = r.ReadByte();
+                bool destroyed = (flags & 1) != 0;
+                bool critical = (flags & 2) != 0;
+
+                Touch(other);
+                CombatSeen?.Invoke(new CombatEvent(
+                    fromMe, other, value, destroyed, critical, DateTime.UtcNow));
                 break;
             }
 
@@ -663,6 +773,8 @@ public sealed class WorldState
             o.Radius = info.Radius;
             o.OwnerObjectId = info.OwnerObjectId ?? 0;
             o.CargoAction = info.CargoAction ?? CargoInteraction.None;
+            o.CardGuid = info.ObjectGuid;
+            o.OwnerCardGuid = info.OwnerGuid;
             o.LastSeen = DateTime.UtcNow;
 
             if (info.PlayerId is { } pid)
@@ -681,6 +793,10 @@ public sealed class WorldState
         }
 
         if (becameMe) SetMe(info.Id);
+
+        // Announced outside the lock: subscribers go and fetch catalogue cards, and holding the
+        // world lock across that would put network work on the traffic-decoding path.
+        if (info.ObjectGuid != 0) ObjectIdentified?.Invoke(info.Id, info.ObjectGuid, info.Type);
     }
 
     /// <summary>

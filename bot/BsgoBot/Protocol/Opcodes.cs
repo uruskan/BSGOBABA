@@ -277,13 +277,27 @@ public enum StatUpdateType : byte
 public enum ObjectStat : ushort
 {
     None = 0,
+    /// <summary>Attacker's side of the hit-chance roll, weighed against the target's Avoidance.</summary>
+    Accuracy = 2,
     DamageHigh = 3,
     DamageLow = 4,
+    PenetrationStrength = 6,
+    ArmorPiercing = 7,
     DamageMining = 8,
+    /// <summary>Defender's side of the hit-chance roll. Scaled down by the target's own
+    /// throttle before use, so a ship sitting still is at its most hittable.</summary>
+    Avoidance = 12,
+    /// <summary>How much Avoidance survives at zero throttle: the multiplier floors at
+    /// <c>1 - AvoidanceFading</c> rather than at zero.</summary>
+    AvoidanceFading = 13,
+    ArmorValue = 15,
+    CriticalDefense = 16,
     Speed = 25,
     BoostSpeed = 26,
     MaxHullPoints = 33,
+    HullRecovery = 34,
     MaxPowerPoints = 35,
+    PowerRecovery = 36,
     DradisRange = 37,
     MapRange = 38,
     OptimalRange = 46,
@@ -296,20 +310,25 @@ public enum ObjectStat : ushort
     MissileDamageLow = 61,
     MissileMaxRange = 67,
     MissileMinRange = 68,
+    MissileAngle = 69,
     MissilePowerPointCost = 70,
     MissileCooldown = 71,
+    CannonAccuracy = 73,
     CannonDamageHigh = 74,
     CannonDamageLow = 75,
     CannonOptimalRange = 80,
     CannonMaxRange = 81,
     CannonMinRange = 82,
+    CannonAngle = 83,
     CannonPowerPointCost = 84,
     CannonCooldown = 85,
+    MiningAccuracy = 86,
     MiningDamageHigh = 87,
     MiningDamageLow = 88,
     MiningOptimalRange = 91,
     MiningMaxRange = 92,
     MiningMinRange = 93,
+    MiningAngle = 94,
     MiningPowerPointCost = 95,
     MiningCooldown = 96,
     Signature = 152,
@@ -394,6 +413,24 @@ public enum ResourceType : uint
     Cubits = 264733124,
     Plutonium = 63148366,
     Uranium = 172582782,
+}
+
+public static class Resources
+{
+    /// <summary>
+    /// What asteroids actually hold. The enum above is a DECODE table — every resource guid the
+    /// client knows about, so a scan reporting any of them can still be named rather than printed
+    /// as a raw number. This is the shorter list of what a rock can genuinely contain, and it is
+    /// the only thing worth offering as a mining filter.
+    ///
+    /// Cubits are premium currency and are not mined; uranium and plutonium are not asteroid
+    /// resources at all. Offering them meant a priority slot that could never match — and, worse,
+    /// silently ranked above one that could.
+    /// </summary>
+    public static readonly ResourceType[] Minable =
+        [ResourceType.Tylium, ResourceType.Water, ResourceType.Titanium];
+
+    public static bool IsMinable(ResourceType r) => Array.IndexOf(Minable, r) >= 0;
 }
 
 /// <summary>ItemFactory.ItemType — the tag byte in front of every serialised item.</summary>

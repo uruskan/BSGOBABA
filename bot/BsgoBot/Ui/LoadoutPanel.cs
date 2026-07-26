@@ -21,14 +21,43 @@ namespace BsgoBot.Ui;
 /// </summary>
 public sealed class LoadoutView : Panel
 {
-    /// <summary>Hexes above the hull. The game shows four, keyed 1-4.</summary>
-    public const int WeaponHexes = 4;
+    /// <summary>
+    /// Hexes above the hull — one per gun slot on the ship you are flying, keyed from 1.
+    ///
+    /// Not a constant, because it is not the same on every ship, and nothing on the wire says
+    /// what it should be: <c>Reply.Slots</c> gives a slot's id and installed system guid and
+    /// never its KIND. It comes from the server profile, where you state it once. Fixing it at
+    /// four numbered a three-gun ship's ability bar from 5 instead of 4, because the bar is
+    /// numbered straight after the weapon hexes.
+    /// </summary>
+    [System.ComponentModel.DesignerSerializationVisibility(
+        System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    public int WeaponHexes
+    {
+        get => _weaponHexes;
+        set
+        {
+            int v = Math.Clamp(value, 1, 8);
+            if (_weaponHexes == v) return;
+            _weaponHexes = v;
+            _hexes.WeaponHexes = v;
+            if (_gunCount is not null) _gunCount.Value = v;
+            Normalise();
+            Refresh2();
+        }
+    }
+
+    private int _weaponHexes = 4;
+
+    /// <summary>The spinner showing the same number, kept in step when the count is set
+    /// programmatically on a profile switch. Null until the constructor has built the toolbar.</summary>
+    private NumberField? _gunCount;
 
     /// <summary>The ability bar. The client builds it from a nine-slot background and caps the
     /// list at ten (GUIAbilityToolbar), so ten is what we draw.</summary>
     public const int BarHexes = 10;
 
-    public const int TotalHexes = WeaponHexes + BarHexes;
+    public int TotalHexes => WeaponHexes + BarHexes;
 
     private readonly WorldState _world;
     private readonly FarmBot _bot;
@@ -79,8 +108,19 @@ public sealed class LoadoutView : Panel
             Refresh2();
         };
 
+        // How many guns this ship has. Nothing on the wire says, so it is stated here and
+        // remembered on the server profile.
+        var gunCount = new NumberField(1, 8, 1, _weaponHexes, "guns") { Margin = new Padding(12, 0, 0, 0) };
+        gunCount.ValueChanged += (_, _) =>
+        {
+            WeaponHexes = gunCount.Value;
+            Changed?.Invoke();
+        };
+
         tools.Controls.Add(btnImport);
         tools.Controls.Add(btnClear);
+        tools.Controls.Add(gunCount);
+        _gunCount = gunCount;
 
         Controls.Add(_table);
         Controls.Add(tools);
@@ -113,8 +153,8 @@ public sealed class LoadoutView : Panel
     {
         foreach (var s in _slots)
         {
-            if (s.SlotId == 0) continue;
-            var live = _world.MyLoadout?.Slot(s.SlotId);
+            if (!s.Bound) continue;
+            var live = _world.MyLoadout?.Slot((ushort)s.SlotId);
             if (live is null || !live.Filled) continue;
             if (s.SystemGuid == 0) s.SystemGuid = live.SystemGuid;
         }
@@ -127,7 +167,7 @@ public sealed class LoadoutView : Panel
     private void Normalise()
     {
         var taken = new HashSet<int>();
-        foreach (var s in _slots.Where(s => s.Hex is >= 1 and <= TotalHexes))
+        foreach (var s in _slots.Where(s => s.Hex >= 1 && s.Hex <= TotalHexes))
             if (!taken.Add(s.Hex)) s.Hex = 0;
 
         foreach (var s in _slots.Where(s => s.Hex == 0))
@@ -141,7 +181,7 @@ public sealed class LoadoutView : Panel
 
         // Anything that still found no home would be invisible; drop the hex claim rather than
         // pretend, and the table's "not placed" line will show it.
-        foreach (var s in _slots.Where(s => s.Hex is < 1 or > TotalHexes)) s.Hex = 0;
+        foreach (var s in _slots.Where(s => s.Hex < 1 || s.Hex > TotalHexes)) s.Hex = 0;
     }
 
     /// <summary>
@@ -153,7 +193,7 @@ public sealed class LoadoutView : Panel
     /// </summary>
     private void ImportUnplaced()
     {
-        var placed = _slots.Where(s => s.SlotId != 0).Select(s => s.SlotId).ToHashSet();
+        var placed = _slots.Where(s => s.Bound).Select(s => (ushort)s.SlotId).ToHashSet();
         var known = KnownSlotIds().Where(id => !placed.Contains(id)).ToList();
         if (known.Count == 0)
         {
@@ -207,7 +247,7 @@ public sealed class LoadoutView : Panel
     private void EditHex(int hex)
     {
         var existing = _slots.FirstOrDefault(s => s.Hex == hex);
-        using var dlg = new SlotEditorDialog(_world, _bot, hex, existing, KnownSlotIds());
+        using var dlg = new SlotEditorDialog(_world, _bot, hex, existing, KnownSlotIds(), WeaponHexes);
         var result = dlg.ShowDialog(FindForm());
 
         if (result == DialogResult.Abort)               // "Clear hex"
@@ -220,7 +260,7 @@ public sealed class LoadoutView : Panel
 
         var edited = dlg.Result;
         // A slot id can only be in one place. Moving it to a new hex vacates the old one.
-        _slots.RemoveAll(s => s != existing && s.SlotId != 0 && s.SlotId == edited.SlotId);
+        _slots.RemoveAll(s => s != existing && s.Bound && s.SlotId == edited.SlotId);
         if (existing is not null) _slots.Remove(existing);
         _slots.Add(edited);
         Refresh2();
@@ -263,6 +303,18 @@ public sealed class LoadoutView : Panel
 
         public event Action<int>? HexClicked;
 
+        /// <summary>Kept in step with the owning view — the bar numbers itself straight after
+        /// the guns, so getting this wrong shifts every ability slot's label.</summary>
+        [System.ComponentModel.DesignerSerializationVisibility(
+            System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+        public int WeaponHexes
+        {
+            get => _weaponHexes;
+            set { _weaponHexes = value; Invalidate(); }
+        }
+
+        private int _weaponHexes = 4;
+
         public HexPanel(WorldState world, FarmBot bot, Func<List<SavedSlot>> source)
         {
             _world = world;
@@ -271,6 +323,33 @@ public sealed class LoadoutView : Panel
             DoubleBuffered = true;
             BackColor = Theme.Bg;
             Cursor = Cursors.Hand;
+        }
+
+        /// <summary>
+        /// Where the gun hexes sit, for any number of them.
+        ///
+        ///       [2][3]
+        ///    [1]      [4]
+        ///
+        /// Same arch the game draws: spread symmetrically about the hull, and the further from
+        /// centre a hex is the lower it hangs, so the ship reads as being between them. This was
+        /// a hardcoded four-point array, which is why the count could never change.
+        /// </summary>
+        private static PointF[] GunPositions(int count, float cx, float top, float r)
+        {
+            float w = r * MathF.Sqrt(3f);
+            var pts = new PointF[count];
+            if (count == 1) { pts[0] = new PointF(cx, top); return pts; }
+
+            float half = (count - 1) / 2f;
+            for (int i = 0; i < count; i++)
+            {
+                float offset = i - half;                       // -1.5 … +1.5 for four
+                float edge = MathF.Abs(offset) / half;         // 0 at the centre, 1 at the ends
+                // Squared so the inner pair stays high and only the outermost really drops.
+                pts[i] = new PointF(cx + offset * w * 1.15f, top + r * 1.15f * edge * edge);
+            }
+            return pts;
         }
 
         /// <summary>Pointy-top hexagon, which is the shape that tiles a row edge to edge — the
@@ -320,19 +399,8 @@ public sealed class LoadoutView : Panel
 
             DrawHull(g, cx, gunTop + gunR * 2.15f, gunR * 1.7f);
 
-            //       [2][3]
-            //    [1]      [4]
-            // Same arrangement as the game: the inner pair sits high and centred, the outer
-            // pair drops and spreads, so the ship reads as being between them.
-            var gunAt = new PointF[]
-            {
-                new(cx - gunW * 1.7f, gunTop + gunR * 1.15f),
-                new(cx - gunW * 0.55f, gunTop),
-                new(cx + gunW * 0.55f, gunTop),
-                new(cx + gunW * 1.7f, gunTop + gunR * 1.15f),
-            };
-
-            for (int i = 0; i < WeaponHexes; i++) DrawHex(g, gunAt[i], gunR, i + 1, true);
+            var gunAt = GunPositions(WeaponHexes, cx, gunTop, gunR);
+            for (int i = 0; i < gunAt.Length; i++) DrawHex(g, gunAt[i], gunR, i + 1, true);
 
             float barX = cx - (BarHexes - 1) * barW / 2f;
             for (int i = 0; i < BarHexes; i++)
@@ -383,8 +451,8 @@ public sealed class LoadoutView : Panel
             _hits.Add((c, r, hex));
 
             var slot = _slots.FirstOrDefault(s => s.Hex == hex);
-            var weapon = slot is { SlotId: > 0 } ? _bot.Weapons.Find(slot.SlotId) : null;
-            bool bound = slot is { SlotId: > 0 };
+            var weapon = slot is { Bound: true } ? _bot.Weapons.Find((ushort)slot.SlotId) : null;
+            bool bound = slot is { Bound: true };
             bool hover = _hover == hex;
 
             var tint = weapon is null ? Theme.Faint : RoleTint(weapon.Role);
@@ -561,8 +629,8 @@ public sealed class LoadoutView : Panel
 
         private void DrawRow(Graphics g, SavedSlot s, int y, int[] widths)
         {
-            var w = s.SlotId == 0 ? null : _bot.Weapons.Find(s.SlotId);
-            var live = s.SlotId == 0 ? null : _world.MyLoadout?.Slot(s.SlotId);
+            var w = !s.Bound ? null : _bot.Weapons.Find((ushort)s.SlotId);
+            var live = !s.Bound ? null : _world.MyLoadout?.Slot((ushort)s.SlotId);
             bool refitted = s.SystemGuid != 0 && live is { Filled: true } && live.SystemGuid != s.SystemGuid;
 
             var text = refitted ? Theme.Warn : s.Enabled ? Theme.Text : Theme.Faint;
@@ -579,7 +647,7 @@ public sealed class LoadoutView : Panel
             string[] cells =
             [
                 s.Hex.ToString(),
-                s.SlotId == 0 ? "—" : $"#{s.SlotId}",
+                s.Bound ? $"#{s.SlotId}" : "—",
                 s.Name.Length > 0 ? s.Name : "(unnamed)",
                 s.Category,
                 w is null ? "—" : w.Role.ToString() + (w.RoleFromUser ? "*" : ""),
@@ -603,7 +671,7 @@ public sealed class LoadoutView : Panel
         /// slots the bot knows about that you have not placed.</summary>
         private void DrawFooter(Graphics g)
         {
-            var placed = _slots.Where(s => s.SlotId != 0).Select(s => s.SlotId).ToHashSet();
+            var placed = _slots.Where(s => s.Bound).Select(s => (ushort)s.SlotId).ToHashSet();
             var loose = _bot.Weapons.All().Select(x => x.AbilityId)
                 .Concat(_world.KnownSlots())
                 .Concat(_world.MySlots().Where(s => s.Filled).Select(s => s.SlotId))
