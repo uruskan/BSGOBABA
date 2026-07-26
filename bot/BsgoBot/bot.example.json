@@ -1,0 +1,59 @@
+{
+  "_comment": [
+    "Copy to bot.json, or just run the bot once and it writes one.",
+    "The real bot.json is gitignored because a captured session is a credential.",
+    "Servers[].Session and Servers[].PlayerId identify your account; do not share them."
+  ],
+
+  "ListenHost": "127.0.0.1",
+  "ListenPort": 27050,
+  "AutoStartProxy": true,
+  "SelectedView": "Map",
+
+  "Servers": [
+    {
+      "Name": "Local server",
+      "Host": "127.0.0.1",
+      "Port": 27060,
+      "PlayerId": "1",
+      "Session": "",
+      "Language": "en",
+      "Weapons": [],
+      "Slots": []
+    }
+  ],
+
+  "Clients": [
+    {
+      "Name": "Client install",
+      "Path": "C:\\Path\\To\\client\\live",
+      "Version": ""
+    }
+  ],
+
+  "SelectedServer": 0,
+  "SelectedClient": 0,
+
+  "Bot": {
+    "FallbackRange": 3000,
+    "AutoApproach": true,
+    "AutoLoot": true,
+    "UseBoost": true,
+    "AsteroidStandoff": 179,
+    "FollowDistance": 350,
+    "RetreatHull": 0.25,
+    "DefendSelf": true,
+    "ThreatRange": 1500,
+    "UseRepairAbility": true,
+    "RepairAtHull": 0.8,
+    "AvoidHostileStations": true,
+    "HostileStationKeepOut": 2500,
+    "HoldFireUntilOptimal": true,
+    "AttackPlayers": false,
+    "FireGunsWhileMining": true,
+    "ScanQueueDepth": 2,
+    "ScanFreshnessSeconds": 900,
+    "Prey": [],
+    "WantedResource": "Any"
+  }
+}

@@ -1,0 +1,20 @@
+# --- secrets -----------------------------------------------------------------
+# bot.json holds a live session token, your player id and your client paths.
+# A captured session is a credential. Never commit it — bot.example.json shows
+# the shape, and the app writes a real one next to the exe on first run.
+bot.json
+
+# --- build output ------------------------------------------------------------
+bin/
+obj/
+*.user
+.vs/
+
+# --- not ours to publish -----------------------------------------------------
+# Decompiled client sources, the launcher payload, the server implementations and
+# the old bot. Kept locally as reference; none of it is this project's code.
+Launcher.zip
+client-src/
+server/
+bsgocore/
+_OldVersion/
