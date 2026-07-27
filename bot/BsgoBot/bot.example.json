@@ -39,6 +39,7 @@
     "AutoApproach": true,
     "AutoLoot": true,
     "UseBoost": true,
+    "BoostShedSeconds": 1.5,
     "AsteroidStandoff": 179,
     "FollowDistance": 350,
     "RetreatHull": 0.25,
@@ -53,6 +54,14 @@
     "FireGunsWhileMining": true,
     "ScanQueueDepth": 2,
     "ScanFreshnessSeconds": 900,
+    "AllowDocking": true,
+    "DockGiveUpSeconds": 10,
+    "RefugeBleedFraction": 0.1,
+    "AsteroidCollisionMargin": 40,
+    "PlanetoidCollisionMargin": 500,
+    "PlanetoidClearanceFactor": 1.25,
+    "SelfPositionTrustSeconds": 4,
+    "SelfPositionWaitSeconds": 6,
     "Prey": [],
     "WantedResource": "Any"
   }

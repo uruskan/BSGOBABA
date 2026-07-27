@@ -35,6 +35,13 @@ public sealed class ShipLoadout(ushort shipId)
     public string Name { get; set; } = "";
     public DateTime UpdatedAt { get; private set; }
 
+    /// <summary>
+    /// Hull condition in points, from PlayerProtocol Reply.ShipInfo — the number the damage
+    /// window shows and titanium buys back. Not the hull bar: that refills by itself, this does
+    /// not, and dying is what empties it. Null until the server states it.
+    /// </summary>
+    public float? Durability { get; set; }
+
     public void Set(ShipSlotInfo slot)
     {
         _slots[slot.SlotId] = slot;

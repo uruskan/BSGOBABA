@@ -54,7 +54,7 @@ Key facts recovered from the client:
 | Thing | How |
 |---|---|
 | **Your ship** | The player id from `+userID` (confirmed by `PlayerProtocol Reply.ID`) matched against the `playerId` inside each `PlayerShip` WhoIs |
-| **Your position** | Your ship's `SyncMove` / `Move` frames |
+| **Your position** | Your ship's `SyncMove` / `Move` frames and its own `WhoIs`. Only `SyncMove`, `Rest`/`Teleport`/`Warp` and `WhoIs` state it outright — steering maneuvers give heading and speed, so between them it is dead reckoning, and the bot tracks how old the last real fix is |
 | **Everyone's position** | `WhoIs` for static objects, movement maneuvers for ships, linear dead reckoning between updates |
 | **Friend or foe** | Faction and group bits of the object id, using the client's own `RelationHelper` rule |
 | **Your weapons** | Per-slot stats when the server sends them, and/or watching you fire (all three fire opcodes) |
@@ -317,13 +317,52 @@ again, because the server respawns asteroid resources on a timer and may pick a 
 
 ### How it approaches
 
-Standoff is `AsteroidStandoff` for rocks (default 179u), otherwise the shortest `OptimalRange`
-among the guns in play, floored by the target's own radius × `RadiusClearance` — every distance
-on the wire is centre-to-centre, and a rock is not a point.
+Standoff is `AsteroidStandoff` past a rock's surface (default 120u, its radius added on top),
+otherwise the shortest `OptimalRange` among the guns in play, floored by the target's own radius ×
+`RadiusClearance` — every distance on the wire is centre-to-centre, and a rock is not a point.
 
 Throttle is full until `BrakingSeconds` (1.6) of travel from the stopping point, then tapers as
-`√t` so it holds speed through most of the zone and brakes hard at the end. Boost engages while
-further out than `BoostMargin`.
+`√t` so it holds speed through most of the zone and brakes hard at the end.
+
+Boost engages whenever there is room to use it and still arrive under control — the braking zone
+plus `BoostShedSeconds` (1.5) of boost travel to come down off it, both measured at boost speed.
+On a typical ship that is around 450u to a rock, so ordinary asteroid hops boost. It drops back to
+cruise before braking starts, and instantly if anything is in the way. The diagnostics `boost`
+line shows the distance it works out to for your ship.
+
+Obstacle avoidance sizes bodies by what they are, not by one flat number:
+
+| Body | Treated as | Knob |
+|---|---|---|
+| Asteroid | `radius × 0.9 + 40u` | `AsteroidCollisionMargin` |
+| Planetoid | `radius × 1.25 + 500u` | `PlanetoidCollisionMargin`, `PlanetoidClearanceFactor` |
+| Ships, stations, debris | `radius + 70u` | `CollisionMargin` |
+
+The ×0.9 is the collider the server actually builds for a rock, so the margin only has to cover
+your own hull. A flat margin made small rocks four or five times their real size — enough that a
+ship in a dense belt is permanently inside somebody's exclusion sphere, braking and steering
+around rocks it had already cleared.
+
+### Where it thinks it is
+
+The server states your position only in some messages (`SyncMove`, `Rest`/`Teleport`/`Warp`, a
+`WhoIs`); an ordinary flight is heading-and-speed updates, so in between, position is *estimated*.
+That estimate drifts while the ship is turning or accelerating.
+
+Before the bot commits to "I've arrived" — cutting the throttle and opening fire — it checks
+whether the ship has flown since the server last said where it is. If so it stops and waits up to
+`SelfPositionWaitSeconds` (6) for a fresh fix, because coming to rest is what makes the server
+send one. A parked ship is never delayed by this: it cannot have drifted. If the server never
+answers, it flies on the estimate and says so.
+
+The diagnostics panel shows the error bar directly:
+
+```
+position fix   1.8s old, trusted, 3 stop(s) to re-confirm
+```
+
+Without it the bot could park motionless next to nothing, status reading `Mining … 146u / 600u`,
+while the rock sat behind it — until the 20s stall watchdog gave up on a perfectly good rock.
 
 ### What it measures
 
@@ -347,6 +386,10 @@ behind. **Reset meter** zeroes all of it, so a refit is a clean experiment: rese
 | Hull below `RepairAtHull` (80%) | Cast the repair module at yourself, on its own reload |
 | Hostile within `ThreatRange` (1500u), or anything locked onto you, while mining | Break off and shoot back (`DefendSelf`) |
 | Hull below `Retreat at hull %` | Run — to a friendly outpost if one isn't past the threat, else directly away, full throttle and boost |
+| Arrived at that outpost | Select it, then dock (`AllowDocking`, on by default). With docking off it shelters under the outpost's guns instead — which is the part that saves the ship |
+| Waiting at the outpost with something still shooting | **Circles it** at boost speed instead of parking — inside dock range so retries stay valid, and a much harder target. It never sits at zero throttle under fire |
+| The dock still isn't landing | It keeps circling for as long as the hull holds — a post-combat dock cooldown can be tens of seconds. Only if the hull drops `RefugeBleedFraction` (10 points) below its best does it give up on that refuge and run |
+| Docked | Repair with titanium, wait `UndockDelaySeconds`, `Room.Quit` back out, resume farming |
 | Inside `HostileStationKeepOut` of an enemy platform/outpost | Guns off, nose out, full throttle — this outranks farming |
 
 Enemy weapon platforms and outposts are never targeted (even with `Attack players` on, unless
@@ -375,8 +418,9 @@ Toolbar controls, persisted to `bot.json`:
 | Mine | Resource filter; `Any` disables scanning entirely |
 
 More lives in `bot.json` than on the toolbar — `ScanQueueDepth`, `ScanFreshnessSeconds`,
-`HostileStationKeepOut`, `RepairAtHull`, `ThreatRange`, `BrakingSeconds`, `FollowDistance` and
-the rest are all editable there. Your declared loadout lives there too, per server profile,
+`HostileStationKeepOut`, `RepairAtHull`, `ThreatRange`, `BrakingSeconds`, `FollowDistance`,
+`AllowDocking`, `AsteroidCollisionMargin`, `PlanetoidCollisionMargin`, `SelfPositionTrustSeconds`
+and the rest are all editable there. Your declared loadout lives there too, per server profile,
 under `Slots`.
 
 ## Status
@@ -389,10 +433,12 @@ approach/steering, target health, auto-loot end to end (`Loot` → `Reply.Loot` 
 a friendly outpost, enemy-emplacement avoidance, orbiting 3D tactical display with
 client-visibility banding and click-to-select, sortable contacts list with real player names,
 declared hex loadout with slot-list decode, pinned targets, go-to and follow runs,
-launcher session capture, diagnostics panel.
+launcher session capture, diagnostics panel, docking (select-then-request, with the server's
+own docking countdown respected) and the repair-and-relaunch cycle behind it.
 
-Not implemented: sector-to-sector jumping, docking to sell, group/wing behaviour, missile
-and flare evasion, power-restore consumables (they cost cubits).
+Not implemented: sector-to-sector jumping, selling cargo while docked, group/wing behaviour,
+missile and flare evasion, power-restore consumables (they cost cubits), server-side
+cancellation of a docking countdown.
 
 ## Scope
 

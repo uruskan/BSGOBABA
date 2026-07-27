@@ -1,4 +1,4 @@
-﻿using System.ComponentModel;
+using System.ComponentModel;
 using System.Diagnostics.CodeAnalysis;
 using System.Drawing.Drawing2D;
 
@@ -376,7 +376,7 @@ public sealed class TextField : Control
         set { _box.Text = value ?? ""; Invalidate(); }
     }
 
-    /// <summary>The text as a number, or null when it is blank or unparsable â€” which is exactly
+    /// <summary>The text as a number, or null when it is blank or unparsable — which is exactly
     /// the distinction the slot editor needs between "50 power" and "I didn't say".</summary>
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public float? Number
@@ -517,7 +517,7 @@ public sealed class StatList : Control
 ///
 /// Built on a real text control rather than a custom-painted one, for a single reason: the
 /// custom version could not be selected or copied. That made it useless for the job a log
-/// exists to do â€” handing a failure to somebody who can act on it â€” and left screenshotting as
+/// exists to do — handing a failure to somebody who can act on it — and left screenshotting as
 /// the only way to get a line out of it.
 ///
 /// The per-line colouring survives, because that is genuinely useful for finding a failure at a
@@ -546,7 +546,7 @@ public sealed class LogView : Control
         _box.WordWrap = false;
         _box.ScrollBars = RichTextBoxScrollBars.Both;
         _box.DetectUrls = false;
-        // Read-only, but still focusable and selectable â€” that is the whole point. The caret is
+        // Read-only, but still focusable and selectable — that is the whole point. The caret is
         // hidden so it does not look editable.
         _box.HideSelection = false;
         _box.ShortcutsEnabled = true;

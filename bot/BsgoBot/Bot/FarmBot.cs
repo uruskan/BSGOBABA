@@ -74,9 +74,31 @@ public sealed class FarmBot
     private uint _mineOreLeft;
     private long _mineOreBanked;
 
+    // Position-fix bookkeeping. _movedAt is the last tick the ship was under way; _fixWaitSince
+    // is when we stopped to ask the server where we really are, and _fixWaitGaveUp latches once
+    // that question has gone unanswered long enough to stop being worth asking.
+    private DateTime _movedAt = DateTime.MinValue;
+    private DateTime _fixWaitSince = DateTime.MinValue;
+    private bool _fixWaitGaveUp;
+    private bool _fixWaitWarned;
+
+    /// <summary>Times the ship stopped on arrival to confirm where it was, for diagnostics.</summary>
+    public int PositionResyncs { get; private set; }
+
     // The obstacle we are currently steering around, so the log gets one line per dodge.
     private uint _dodgeId;
     private DateTime _dodgeSince = DateTime.MinValue;
+
+    /// <summary>
+    /// The obstacle we are currently backing OUT of, as opposed to steering around.
+    ///
+    /// Being inside a body's clearance sphere is a different state from having one in the way,
+    /// and it needs to be remembered rather than recomputed. Without it the ship leaves the
+    /// sphere by a single unit, immediately re-aims at a target on the far side of the rock, and
+    /// flies straight back in — which, next to a 400u asteroid, is a loop that never ends.
+    /// </summary>
+    private uint _escapeFrom;
+    private DateTime _escapeSince = DateTime.MinValue;
 
     /// <summary>Rock we are roaming to with nothing better to do, so the log says so once.</summary>
     private uint _roamTarget;
@@ -86,6 +108,9 @@ public sealed class FarmBot
     private bool _idle;
 
     private readonly Dictionary<uint, DateTime> _skip = new();
+
+    /// <summary>Skips that <see cref="Roam"/> may not drop. See <see cref="SkipHard"/>.</summary>
+    private readonly Dictionary<uint, DateTime> _hardSkip = new();
     private readonly HashSet<uint> _lootAsked = [];
     private readonly HashSet<uint> _facilityOrdered = [];
     private readonly Lock _gate = new();
@@ -109,6 +134,22 @@ public sealed class FarmBot
     private int _scansWithoutReply;
     private bool _ammoWarned;
 
+    /// <summary>Unanswered casts per rock since that rock last answered. Silence concentrated on
+    /// one rock convicts the rock — it no longer exists — not the scanner.</summary>
+    private readonly Dictionary<uint, int> _scanStrikes = new();
+
+    /// <summary>The distinct rocks with any unanswered cast since the last reply from anyone.
+    /// A dead consumable silences EVERY rock; one mute rock is the rock's own fault.</summary>
+    private readonly HashSet<uint> _unansweredRocks = [];
+
+    // Held-fire watchdog: how long MineTick has been engaged on one rock without a single shot
+    // being possible — waiting for a scan, missing a known reach, parked outside every firing
+    // band. One clock across all of those states, because they are one situation: engaged, not
+    // firing, and nothing changing.
+    private uint _holdId;
+    private DateTime _holdSince;
+    private DateTime _holdSeen;
+
     /// <summary>Whether we've already announced that filtering has been given up on because the
     /// scanner stopped answering. Cleared the moment a scan reply arrives.</summary>
     private bool _filterAbandoned;
@@ -119,14 +160,39 @@ public sealed class FarmBot
     /// The server says nothing when it refuses a cast for want of a consumable, so a scanner out
     /// of power cells looks exactly like one that is working but slow. After this many casts with
     /// no reply at all, it is not slow.
+    ///
+    /// But only when the silence spans more than one rock. An empty consumable mutes every rock
+    /// alike; casts swallowed by a single rock convict that rock — it is gone — and blaming the
+    /// scanner for it tore the resource filter down every time the bot parked at a ghost.
     /// </summary>
-    private bool ScannerAnswering => _scansWithoutReply < ScanFailuresBeforeUnfiltered;
+    private bool ScannerAnswering =>
+        _scansWithoutReply < ScanFailuresBeforeUnfiltered || _unansweredRocks.Count < 2;
 
     // ---- docking ---------------------------------------------------------------------
     private uint _dockTarget;
     private bool _docking;
     private DateTime _dockAsked = DateTime.MinValue;
     private DateTime _dockStarted = DateTime.MinValue;
+
+    /// <summary>So the "not docking, and here is why" line is said once per retreat rather than
+    /// four times a second for as long as the ship shelters there.</summary>
+    private bool _dockDisabledSaid;
+
+    /// <summary>The refuge we are currently parked at, and since when — the clock that decides a
+    /// door is not going to open.</summary>
+    private uint _dockTryId;
+    private DateTime _dockTrySince = DateTime.MinValue;
+
+    /// <summary>Objects that looked dockable, were flown to, and did not take us in. Per sector,
+    /// because ids are.</summary>
+    private readonly HashSet<uint> _dockRefused = [];
+
+    /// <summary>Best hull fraction seen since arriving at the current refuge. The reference the
+    /// "is being here working" test measures against.</summary>
+    private float _refugeHullBest;
+
+    /// <summary>Whether the ship is currently circling a refuge rather than parked at it.</summary>
+    private bool _orbiting;
 
     /// <summary>
     /// Distance at which YOU last docked successfully. The real limit is the station's
@@ -135,6 +201,34 @@ public sealed class FarmBot
     /// guess one that might not.
     /// </summary>
     private float _learnedDockRange;
+
+    // ---- death, repair and relaunch ---------------------------------------------------
+    /// <summary>When the ship stopped being in the sector, or null while it is flying.</summary>
+    private DateTime? _hangarSince;
+
+    /// <summary>The death screen the server offered, waiting to be answered.</summary>
+    private IReadOnlyList<(uint SectorId, uint CarrierPlayerId)>? _respawnOffer;
+
+    /// <summary>The last death screen we were shown, kept after it was answered. A ship that will
+    /// not launch is usually a ship the server still has dead, and this is the only thing that
+    /// can say so again — the server does not repeat the offer.</summary>
+    private IReadOnlyList<(uint SectorId, uint CarrierPlayerId)>? _lastRespawnOffer;
+
+    private DateTime _respawnAnswered = DateTime.MinValue;
+    private DateTime _lastLaunchAsk = DateTime.MinValue;
+    private int _launchAsks;
+    private bool _repairAsked;
+    private DateTime _repairAskedAt = DateTime.MinValue;
+    private float? _conditionBeforeRepair;
+    private bool _repairWarned;
+
+    /// <summary>True from the moment we were destroyed until the next launch. The repair is worth
+    /// asking for even with no card to compare against, because dying always costs condition.</summary>
+    private bool _diedHere;
+
+    /// <summary>When you last asked to dock yourself. A removal that follows one of your own dock
+    /// requests is you parking the ship, not the bot losing it — and the bot must not undo it.</summary>
+    private DateTime _youDockedAt = DateTime.MinValue;
 
     public WeaponBook Weapons { get; } = new();
 
@@ -209,9 +303,17 @@ public sealed class FarmBot
     /// back in the regular gear by itself when the hold runs dry.</summary>
     public bool UseBoost { get; set; } = true;
 
-    /// <summary>Boost only while we are this much further out than we need to be, so the ship
-    /// isn't still doing boost speed when it arrives.</summary>
-    public float BoostMargin { get; set; } = 1500f;
+    /// <summary>
+    /// Seconds of boost-speed travel to leave for shedding the boost, on top of the braking zone.
+    ///
+    /// This replaces a flat 1,500u margin, which was asking the wrong question. "Am I far enough
+    /// out to boost" is not a fixed distance, it is "is there room to run fast and still stop" —
+    /// the braking zone plus the room it takes to come down off boost. The flat number was about
+    /// three times the real requirement, so with a rock's standoff at ~170u nothing closer than
+    /// 1,670u ever boosted, and no asteroid hop in a belt is that long. Every mining approach ran
+    /// at cruise; the only boosts in a 48-minute session were two retreats across the sector.
+    /// </summary>
+    public float BoostShedSeconds { get; set; } = 1.5f;
 
     /// <summary>
     /// Throttle used when the server never published the ship's Speed stat AND you have never
@@ -342,14 +444,26 @@ public sealed class FarmBot
     public float MinimumStandoff { get; set; } = 150f;
 
     /// <summary>
-    /// Where to hold station on an asteroid, in units from its centre. An explicit number beats
-    /// anything derived: the radius the server publishes is a bounding figure, and you can see
-    /// how big these things actually are. 0 falls back to the derived standoff.
+    /// The gap to leave between the ship and an asteroid's <b>surface</b>. The rock's own radius
+    /// is added on top, so one number works for a 30u pebble and a 400u boulder alike.
+    ///
+    /// It used to be measured from the centre, which made it a setting you could not feel: it was
+    /// floored by radius + margin, so on anything bigger than the number you typed the floor won
+    /// and the value did nothing at all. 0 falls back to the derived standoff.
     ///
     /// Costs no accuracy to set low — the server's hit chance is flat at or below optimal range
     /// (HitchanceBasedOnThrottle.getChanceToHit) and only falls off beyond it.
     /// </summary>
-    public float AsteroidStandoff { get; set; } = 179f;
+    public float AsteroidStandoff { get; set; } = 120f;
+
+    /// <summary>
+    /// How far outside a body's clearance sphere to park, as a multiple of it.
+    ///
+    /// Exists because "just outside" and "exactly on the edge" behave completely differently: a
+    /// ship parked on the boundary flips between "holding station" and "inside an obstacle" on
+    /// noise alone.
+    /// </summary>
+    public float StandoffMargin { get; set; } = 1.15f;
 
     /// <summary>Same, for planetoids — which are enormous, and mined by ordering a mining ship
     /// rather than by shooting, so this is not clamped to weapon reach.</summary>
@@ -385,9 +499,34 @@ public sealed class FarmBot
     /// </summary>
     public bool AvoidCollisions { get; set; } = true;
 
-    /// <summary>Clearance to add to an obstacle's own radius, in units. The published radius is
-    /// a bounding figure for the object, and says nothing about our own hull.</summary>
+    /// <summary>Clearance to add to an obstacle's own radius, in units, for everything that is
+    /// not an asteroid or a planetoid — ships, stations, debris. The published radius is a
+    /// bounding figure for the object, and says nothing about our own hull.</summary>
     public float CollisionMargin { get; set; } = 130f;
+
+    /// <summary>
+    /// Room to leave around an asteroid, on top of 90% of its radius — which is the collider the
+    /// server actually builds for it.
+    ///
+    /// Deliberately small. Rocks are what the ship spends its life threading between, they are
+    /// mostly tiny, and every unit here is added to a sphere the bot must stay out of, must brake
+    /// for, and must steer around. Floored by our own hull radius, which is the only part of this
+    /// that is genuinely non-negotiable.
+    /// </summary>
+    public float AsteroidCollisionMargin { get; set; } = 40f;
+
+    /// <summary>
+    /// Room to leave around a planetoid, on top of its scaled radius.
+    ///
+    /// Deliberately large, and for the opposite reason: there are a handful of them, none of them
+    /// are on the way to anything, and the ship approaches them at cruise. A flat margin that
+    /// suits a 40u rock is a rounding error on a 1,500u body.
+    /// </summary>
+    public float PlanetoidCollisionMargin { get; set; } = 500f;
+
+    /// <summary>How much of a planetoid's published radius to treat as solid. Above 1 because
+    /// nothing about a planetoid's stated size is conservative.</summary>
+    public float PlanetoidClearanceFactor { get; set; } = 1.25f;
 
     /// <summary>How far ahead to look for obstacles, in seconds of travel at top speed. This has
     /// to cover the turn as well as the stop: the heading only updates a few times a second, so
@@ -440,6 +579,28 @@ public sealed class FarmBot
     public int ScanRetrySeconds { get; set; } = 20;
 
     /// <summary>
+    /// Unanswered casts at ONE rock before that rock is condemned as gone.
+    ///
+    /// The server answers a scan at any rock that exists and silently swallows a cast at one
+    /// that doesn't, so silence concentrated on a single rock is evidence about the rock, not
+    /// the scanner. Two casts a retry apart is ~40s of proof.
+    /// </summary>
+    public int ScanStrikesBeforeGone { get; set; } = 2;
+
+    /// <summary>How long a rock condemned as unscannable or unworkable stays off the menu.
+    /// Long, because the only cure is the server respawning the rock.</summary>
+    public int MuteRockSkipMinutes { get; set; } = 30;
+
+    /// <summary>
+    /// How long the mining loop may sit engaged on one rock with no shot possible — waiting for
+    /// a scan, no reach known for any gun, parked outside every firing band — before the rock is
+    /// given up on. These holds used to have no clock at all: each returned before any watchdog
+    /// armed, and the stall watchdog only counts time while the guns actually fire, so a rock
+    /// that could never be worked parked the ship at full power indefinitely.
+    /// </summary>
+    public float HeldFirePatienceSeconds { get; set; } = 30f;
+
+    /// <summary>
     /// How long a scan result is trusted before the rock is worth re-scanning. Asteroid resources
     /// respawn on a server-side timer and can come back as something else.
     ///
@@ -470,6 +631,38 @@ public sealed class FarmBot
     /// firing on a rock that is merely tough.
     /// </summary>
     public float MiningStallSeconds { get; set; } = 20f;
+
+    /// <summary>
+    /// How old the server's last statement of where we are may be before a distance is no longer
+    /// worth acting on.
+    ///
+    /// Only some messages carry our real position — SyncMove, the Rest/Teleport/Warp maneuvers, a
+    /// WhoIs. A normal approach is Directional maneuvers, heading and march speed only, so in
+    /// between the ship's position is integrated: flown straight, at the ordered speed, from the
+    /// last fix. The real ship arcs through its turn and takes time to reach that speed, so the
+    /// model runs ahead of it, and the error grows for as long as the flight lasts.
+    ///
+    /// That error is what parked the ship out of reach of a rock the status line said it was
+    /// mining: the modelled distance crossed inside mining range, the throttle was cut, and the
+    /// lasers fired at something the server considered too far away — silently, because an
+    /// out-of-range cast is refused without a reply. Nothing recovered until the 20s stall
+    /// watchdog gave up on a perfectly good rock.
+    ///
+    /// Four seconds because the model is accurate for a second or two, and <see
+    /// cref="SpaceObj.PredictedPosition"/> stops advancing at three regardless.
+    /// </summary>
+    public float SelfPositionTrustSeconds { get; set; } = 4f;
+
+    /// <summary>
+    /// How long to sit still waiting for a fresh fix before flying on with the estimate anyway.
+    ///
+    /// Stopping is what asks the question: the ship coming to rest makes the server broadcast a
+    /// Rest maneuver, which states a position outright. But a server that never sends one must
+    /// not be able to park the bot indefinitely — a stationary ship's estimate stops drifting in
+    /// any case, so past this point the estimate is the best there is and working on it beats
+    /// waiting for something that isn't coming.
+    /// </summary>
+    public float SelfPositionWaitSeconds { get; set; } = 6f;
 
     /// <summary>
     /// The distance at which a rock is worth half its ore. Lower keeps the ship local; higher
@@ -559,6 +752,9 @@ public sealed class FarmBot
         _world.CastResult += OnCastResult;
         _world.AbilityStopped += OnAbilityStopped;
         _world.SectorLeft += OnSectorLeft;
+        _world.RespawnOffered += OnRespawnOffered;
+        _world.ShipConditionChanged += OnShipCondition;
+        _world.AnchorChanged += OnAnchorChanged;
         _world.ScanReceived += OnScanReceived;
         _world.HoldGained += items => Meter.OnHoldGained(items, DateTime.UtcNow);
 
@@ -623,6 +819,14 @@ public sealed class FarmBot
             Log?.Invoke("Fly-to ended — farming takes the ship back.");
         }
 
+        // Pressing Go farm is also "try the scanner again". The dead-scanner verdict exists to
+        // stop the bot wasting casts on its own; a person restarting the farm has had the
+        // chance to refill cells or fix the loadout, and making them reconnect to clear a
+        // verdict built on stale evidence is what made a fine scanner stay "broken".
+        lock (_gate) _unansweredRocks.Clear();
+        _scansWithoutReply = 0;
+        _ammoWarned = false;
+
         Enabled = true;
         Status = "Starting";
         _timer.Change(0, 250);
@@ -650,9 +854,11 @@ public sealed class FarmBot
         lock (_gate)
         {
             _target = 0; _lockedTarget = 0; _subscribedTarget = 0; _pinned = 0;
-            _lootAsked.Clear(); _facilityOrdered.Clear(); _skip.Clear();
+            _lootAsked.Clear(); _facilityOrdered.Clear(); _skip.Clear(); _hardSkip.Clear();
             _scanAsked.Clear(); _scanProbe.Clear(); _probed.Clear();
+            _scanStrikes.Clear(); _unansweredRocks.Clear(); _dockRefused.Clear();
         }
+        _roamTarget = 0;
         _scansWithoutReply = 0;
         _ammoWarned = false;
         _filterAbandoned = false;     // fresh session, so nothing has failed yet — no message
@@ -707,8 +913,11 @@ public sealed class FarmBot
     /// silence and gets retried. Mines were in this list and should never have been: a mine has
     /// a World card like everything else, and no Ship card at all.
     ///
-    /// <b>World for anything we might have to fly around.</b> That one is cheap and always
-    /// exists, and it carries the radius the collision avoidance wants.
+    /// <b>World only for things that shoot at us</b>, which is why asteroids and planetoids are
+    /// absent despite being the things we actually fly around. Their radius already arrives in
+    /// the WhoIs body and is read straight into <c>SpaceObj.Radius</c>, so a card would buy
+    /// nothing — and there are hundreds of rocks in a belt against a handful of hostiles, so
+    /// asking for all of them is hundreds of requests the real client also has to swallow.
     /// </summary>
     private void OnObjectIdentified(uint objectId, uint cardGuid, SpaceEntityType type)
     {
@@ -728,6 +937,38 @@ public sealed class FarmBot
         Weapons.ResetToggles();
         ForgetThrottle();
 
+        // A fresh spell out of the sector: the relaunch sequence starts from here, whatever the
+        // last one did. Note what is NOT reset — the death screen and the fact that we died. The
+        // two messages arrive in whichever order the server sends them, and wiping a respawn
+        // offer that landed first would leave the ship dead with nothing left to answer it.
+        _hangarSince = DateTime.UtcNow;
+        _launchAsks = 0;
+        _lastLaunchAsk = DateTime.MinValue;
+        _respawnAnswered = DateTime.MinValue;
+        _repairAsked = false;
+        _repairWarned = false;
+        _conditionBeforeRepair = null;
+
+        if (cause == RemovingCause.Death)
+        {
+            Deaths++;
+            _diedHere = true;
+            Log?.Invoke(AutoUndock
+                ? $"Destroyed (death #{Deaths}). Waiting for the respawn options."
+                : $"Destroyed (death #{Deaths}). Auto undock is off — respawn in the client.");
+        }
+
+        // You parked the ship yourself. Relaunching it would be the bot undoing an instruction,
+        // so the farm stops instead and says why.
+        bool yourDock = cause == RemovingCause.Dock
+                     && !_docking
+                     && (DateTime.UtcNow - _youDockedAt).TotalSeconds < 60;
+        if (yourDock && Enabled)
+        {
+            Stop();
+            Log?.Invoke("You docked by hand — farming stopped. Press Go farm after undocking.");
+        }
+
         // Leaving by Dock means the dock run worked; anything else ends it just as surely.
         if (_docking)
         {
@@ -745,6 +986,16 @@ public sealed class FarmBot
             _lootAsked.Clear(); _facilityOrdered.Clear();
             // Rocks are per-sector; the learned scanner is not, so _probed stays.
             _scanAsked.Clear(); _scanProbe.Clear();
+            _scanStrikes.Clear(); _unansweredRocks.Clear();
+            // The scanner-is-dead verdict goes with them. Every silent cast it was built on
+            // aimed at a rock that no longer exists for us, and a hangar visit is exactly
+            // where empty power cells get refilled — a verdict carried through a dock once
+            // condemned a working scanner two casts into the next launch.
+            _scansWithoutReply = 0;
+            _ammoWarned = false;
+            // A station that would not take us in is a fact about that station, and ids do not
+            // survive a sector change.
+            _dockRefused.Clear();
         }
         Log?.Invoke($"Left the sector ({cause}). World cleared.");
     }
@@ -767,6 +1018,17 @@ public sealed class FarmBot
                     return;
                 }
 
+                // The docking countdown. The server answers a dock request with the delay it is
+                // imposing — the client disables its DOCK button for that long and offers
+                // CancelDocking instead (DockingButton.UpdateState). The bot knew the opcode and
+                // did nothing with it, so it could not tell a countdown from silence.
+                //
+                // Read through its own reader: `r` is handed to the world model below, and a
+                // half-consumed one would leave that reading from the middle of the message.
+                if (f.Protocol == ProtocolId.Game
+                    && (GameOp.Reply)f.MsgType == GameOp.Reply.DockingDelay)
+                    NoteDockingDelay(f.Reader().ReadSingle());
+
                 _world.OnServerMessage(f.Protocol, f.MsgType, r);
                 return;
             }
@@ -781,7 +1043,30 @@ public sealed class FarmBot
                 }
 
                 case ProtocolId.Game:
-                    OnClientGameMessage(f.MsgType, r);
+                    OnClientGameMessage(f, r);
+                    break;
+
+                // What the hangar buttons actually send, printed as it happens. This is how the
+                // undock sequence was pinned down rather than guessed: press UNDOCK and the log
+                // states the message, in order, with nothing inferred.
+                case ProtocolId.Room:
+                    Log?.Invoke($"Client sent Room/{(RoomOp.Request)f.MsgType} ({f.MsgType}).");
+
+                    // Room.Enter is the client loading a hangar, which it only does once the
+                    // server has docked it. The server does not always announce that dock to us —
+                    // one retreat docked cleanly, got no RemoveMe, and the bot spent the next
+                    // half minute circling a station it was already inside of, steering by a
+                    // position frozen at the moment of the dock. The client's own room load is
+                    // the one signal that cannot be missing, so if the world still thinks we are
+                    // flying when it lands, this IS the dock notification.
+                    if ((RoomOp.Request)f.MsgType == RoomOp.Request.Enter
+                        && (_world.MyObjectId != 0 || _world.MyPositionKnown))
+                    {
+                        Log?.Invoke("Room/Enter with the ship still in the world — the dock "
+                                  + "succeeded without a RemoveMe. Treating it as docked.");
+                        _world.Clear();
+                        OnSectorLeft(RemovingCause.Dock);
+                    }
                     break;
             }
         }
@@ -791,9 +1076,11 @@ public sealed class FarmBot
         }
     }
 
-    private void OnClientGameMessage(ushort msgType, BgoReader r)
+    private void OnClientGameMessage(FrameInfo f, BgoReader r)
     {
-        switch ((GameOp.Request)msgType)
+        NoteClientMessage(f.MsgType);
+
+        switch ((GameOp.Request)f.MsgType)
         {
             // The three ways the client fires. Only watching CastSlotAbility meant a beam or
             // any auto-cast weapon never registered, no matter how long you held the trigger.
@@ -850,6 +1137,13 @@ public sealed class FarmBot
                 break;
             }
 
+            // The other half of the undock sequence, logged for the same reason as Room.Quit:
+            // the client sends this itself once the space level has loaded, and seeing the two
+            // land in order is the whole proof of how undocking works.
+            case GameOp.Request.JumpIn:
+                Log?.Invoke("Client sent Game/JumpIn (61) — its space level has finished loading.");
+                break;
+
             // You picked a target by hand — respect it if it suits the current mode.
             case GameOp.Request.LockTarget:
             {
@@ -868,6 +1162,22 @@ public sealed class FarmBot
             case GameOp.Request.Dock:
             {
                 uint id = r.ReadUInt32();
+
+                // Only the real client's traffic reaches here — injected frames go straight to
+                // the server — so this really is you pressing dock, not the bot's own dock run.
+                _youDockedAt = DateTime.UtcNow;
+
+                // Dumped raw, because every Dock the bot has sent itself was followed within
+                // 400ms by the server hanging up, three times out of three, while the message
+                // itself is byte-for-byte what GameProtocol.RequestDock writes. Something ELSE
+                // about a real dock differs, and the only way to find out what is to read one.
+                //
+                // The whole frame, not just this message: the client batches everything queued in
+                // a tick into one frame, so if a dock is really "LockTarget then Dock" — which is
+                // what SpaceLevel.Dock implies, since it docks GetPlayerTarget() — the proof is
+                // in the other messages sitting beside it.
+                DumpDockFrame(f);
+
                 var station = _world.Get(id);
                 if (station is not null && _world.DistanceToMe(station) is { } d && d > _learnedDockRange)
                 {
@@ -973,7 +1283,21 @@ public sealed class FarmBot
     {
         // Any reply at all proves the scanner is fed and firing, whoever triggered it.
         _scansWithoutReply = 0;
+        lock (_gate) { _scanStrikes.Remove(asteroidId); _unansweredRocks.Clear(); }
         if (_filterAbandoned) { _filterAbandoned = false; Log?.Invoke("Scanner is answering again — resource filtering is back on."); }
+
+        // An answer is proof of reach: the server drops scan targets outside the ability's own
+        // MaxRange without saying anything, so anything it DID answer was inside it. This is the
+        // only honest measurement of a reach nothing publishes — and it grows on its own, so a
+        // scanner that turns out to reach 2,000u is used at 2,000u without anyone typing that in.
+        if (_world.Get(asteroidId) is { } rock && _world.DistanceToMe(rock) is { } d
+            && d > _scanProvenRange)
+        {
+            float was = _scanProvenRange;
+            _scanProvenRange = d;
+            if (Scanner()?.MaxRange is not > 0 && d > was * 1.2f)
+                Log?.Invoke($"Scan answered from {d:F0}u — using that as the scanner's proven reach.");
+        }
 
         ushort ability;
         lock (_gate)
@@ -1118,6 +1442,8 @@ public sealed class FarmBot
     {
         if (!Enabled && !_docking && !_following) return;
         if (Interlocked.Exchange(ref _busy, 1) == 1) return;   // never overlap ticks
+
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
         try
         {
             TickCore().GetAwaiter().GetResult();
@@ -1129,7 +1455,45 @@ public sealed class FarmBot
         finally
         {
             Interlocked.Exchange(ref _busy, 0);
+            NoteTickCost(System.Diagnostics.Stopwatch.GetElapsedTime(started));
         }
+    }
+
+    /// <summary>Worst and mean farm tick since the last report, for the diagnostics panel.</summary>
+    public double SlowestTickMs { get; private set; }
+    public double MeanTickMs { get; private set; }
+
+    private double _tickTotalMs;
+    private int _tickCount;
+    private DateTime _tickReportedAt = DateTime.UtcNow;
+
+    /// <summary>
+    /// Times the farm tick, and says so when it overruns.
+    ///
+    /// Added because two separate performance theories were argued from behaviour rather than
+    /// from a number. The tick has a 250ms budget; anything approaching that is starving the
+    /// message pump it shares a machine with, and anything past it means ticks are being dropped
+    /// outright. Reported at most once every 10 seconds so the cure is not another log flood.
+    /// </summary>
+    private void NoteTickCost(TimeSpan elapsed)
+    {
+        double ms = elapsed.TotalMilliseconds;
+        _tickTotalMs += ms;
+        _tickCount++;
+        if (ms > SlowestTickMs) SlowestTickMs = ms;
+
+        var now = DateTime.UtcNow;
+        if ((now - _tickReportedAt).TotalSeconds < 10) return;
+
+        MeanTickMs = _tickCount > 0 ? _tickTotalMs / _tickCount : 0;
+        if (SlowestTickMs > 100)
+            Log?.Invoke($"Farm tick is slow — {MeanTickMs:F0}ms mean, {SlowestTickMs:F0}ms worst "
+                      + $"over {_tickCount} tick(s), against a 250ms budget.");
+
+        _tickReportedAt = now;
+        _tickTotalMs = 0;
+        _tickCount = 0;
+        SlowestTickMs = 0;
     }
 
     private async Task TickCore()
@@ -1159,6 +1523,14 @@ public sealed class FarmBot
                           + "power and role, with nothing typed in.");
         }
 
+        // Not in the sector: dead, docked, or jumping. Getting back out is its own sequence and
+        // it runs above every flying decision, because none of them apply to a ship in a hangar.
+        if (await HangarTickAsync()) return;
+
+        // In the sector but not flying: riding a carrier. Above everything for the same reason,
+        // and it is the stricter case — a hangar cannot be steered into an outpost, a carrier can.
+        if (await AnchorTickAsync()) return;
+
         if (_world.MyObjectId == 0)
         {
             Status = _world.MyPlayerId == 0
@@ -1172,6 +1544,12 @@ public sealed class FarmBot
             Status = "Know your ship, but the server hasn't sent its position yet";
             return;
         }
+
+        // When we were last under way, which is the only thing that can put our idea of where we
+        // are out of step with the server's. Sampled here rather than in the mining loop because
+        // the flight that causes the drift is just as likely to have been a chase or a dock run.
+        if (_throttleOpen || _world.MyVelocity.LengthSquared() > 1f)
+            _movedAt = DateTime.UtcNow;
 
         // Compare ratios with ratios. MyHull is in points, so the old `MyHull < RetreatHull`
         // asked whether 495 was below 0.25 — it never was, and the retreat threshold did nothing.
@@ -1193,6 +1571,9 @@ public sealed class FarmBot
             Status = $"HULL {hull:P0} — disengaged. Raise the retreat threshold to keep going.";
             return;
         }
+
+        // Out of the retreat, so the next one gets to explain itself again.
+        _dockDisabledSaid = false;
 
         // Sitting inside an enemy station's envelope outranks farming: nothing found there is
         // worth what it costs, and the station will keep firing for as long as we stay.
@@ -1401,11 +1782,153 @@ public sealed class FarmBot
 
     // ------------------------------------------------------------------ docking
 
+    /// <summary>
+    /// Whether the bot may send a dock request at all.
+    ///
+    /// On, now that the sequence is right. It was briefly off for good reason: three dock
+    /// requests had ever been sent — 02:18:54, 02:34:54 and 13:37:15 on 27 Jul — and the server
+    /// hung up 78ms, 364ms and 80ms later, with no case of one working.
+    ///
+    /// Neither the message nor the range was ever the problem. A real dock captured off the wire
+    /// is <c>022D000100004A00000000</c>, which is byte-for-byte what the bot sent, and the same
+    /// outpost accepted a manual dock from 791u while the bot was asking from 248u. What was
+    /// missing was the LockTarget in front of it — see <see cref="LockBeforeDockAsync"/>.
+    ///
+    /// Kept as a switch because it is the one action with a proven history of ending sessions.
+    /// Turning it off costs nothing but the last step: the retreat still runs to the outpost and
+    /// shelters under its guns, which is the part that saves the ship.
+    /// </summary>
+    public bool AllowDocking { get; set; } = true;
+
+    /// <summary>Until when the server says a docking countdown is running, from Reply.DockingDelay.
+    /// The client disables its dock button for exactly this long, so a second request inside the
+    /// window is something the real client can never send.</summary>
+    private DateTime _dockCountdownUntil = DateTime.MinValue;
+
+    private bool DockCountdownRunning => DateTime.UtcNow < _dockCountdownUntil;
+
+    /// <summary>
+    /// Records the docking countdown the server just imposed.
+    /// </summary>
+    private void NoteDockingDelay(float seconds)
+    {
+        _dockCountdownUntil = DateTime.UtcNow.AddSeconds(Math.Max(0f, seconds));
+        Log?.Invoke($"Server answered with a docking countdown of {seconds:F1}s — "
+                  + "holding off any further dock request until it runs out.");
+    }
+
+    /// <summary>
+    /// Prints one of YOUR dock requests exactly as it left the client.
+    ///
+    /// Both halves matter. The frame hex settles whether our own dock message is wrong at the
+    /// byte level. The message list settles the likelier question: the client only ever docks
+    /// <c>GetPlayerTarget()</c>, so a real dock may well be a LockTarget followed by a Dock, and
+    /// the bot's retreat clears its target before asking.
+    /// </summary>
+    private void DumpDockFrame(FrameInfo f)
+    {
+        Log?.Invoke($"YOUR DOCK — raw frame, {f.Payload.Length}b: {Convert.ToHexString(f.Payload)}");
+
+        var parts = MessageSplitter.Split(f.Payload, fromClient: true);
+        Log?.Invoke($"YOUR DOCK — that frame holds {parts.Count} message(s): "
+                  + string.Join(" + ", parts.Select(m =>
+                        $"{(GameOp.Request)m.MsgType}({m.MsgType}) {m.BodyLength}b")));
+
+        (DateTime At, ushort Type)[] recent;
+        lock (_gate) recent = _clientTrail.ToArray();
+        if (recent.Length > 0)
+        {
+            var now = DateTime.UtcNow;
+            Log?.Invoke("YOUR DOCK — what the client sent in the seconds before it: "
+                      + string.Join(", ", recent.Select(e =>
+                            $"-{(now - e.At).TotalSeconds:F1}s {(GameOp.Request)e.Type}")));
+        }
+    }
+
+    /// <summary>The last few Game requests the real client sent, so a dock can be read in
+    /// context rather than in isolation. Bounded and cheap: two fields per entry.</summary>
+    private readonly Queue<(DateTime At, ushort Type)> _clientTrail = new();
+
+    private void NoteClientMessage(ushort msgType)
+    {
+        lock (_gate)
+        {
+            _clientTrail.Enqueue((DateTime.UtcNow, msgType));
+            while (_clientTrail.Count > 16) _clientTrail.Dequeue();
+        }
+    }
+
+    /// <summary>When we locked the station we are about to dock.</summary>
+    private DateTime _dockLockedAt = DateTime.MinValue;
+
+    /// <summary>How long to let a lock settle before docking on the back of it. One tick would
+    /// probably do; this is a couple, because the whole point is to stop racing the server.</summary>
+    private const double DockLockSettleMs = 600;
+
+    /// <summary>
+    /// Selects the station, the way a player does, and says whether the dock must still wait.
+    ///
+    /// This is the fix for the three sessions that ended within 400ms of a dock request. The
+    /// message we sent was byte-for-byte identical to the one the client sends — proven by
+    /// dumping a real one: both are <c>022D000100004A00000000</c> — and the range was fine, since
+    /// the same outpost accepted a manual dock from 791u while the bot was asking from 248u.
+    ///
+    /// What differed was everything around it. <c>SpaceLevel.Dock()</c> can only ever dock
+    /// <c>GetPlayerTarget()</c>, so a real dock is always a LockTarget followed by a Dock — and
+    /// the captured trail shows exactly that, a LockTarget for the outpost twenty seconds ahead of
+    /// the dock. The retreat, meanwhile, cleared its target as its first act and asked to dock a
+    /// station the server had never been told we had selected. That is a request no client can
+    /// produce, and this server answers it by hanging up rather than refusing.
+    ///
+    /// Returns true while the caller should hold off.
+    /// </summary>
+    private async Task<bool> LockBeforeDockAsync(SpaceObj station)
+    {
+        if (_lockedTarget != station.Id)
+        {
+            await EnsureLocked(station.Id);
+
+            // EnsureLocked declines to lock something the client could not see. Docking on the
+            // back of a lock that never went out is the very thing this exists to prevent, so
+            // that case waits rather than falling through.
+            if (_lockedTarget != station.Id)
+            {
+                WarnOnce($"cannot lock {station} to dock at it — the lock was refused.");
+                return true;
+            }
+
+            _dockLockedAt = DateTime.UtcNow;
+            lock (_gate) _target = station.Id;
+            Log?.Invoke($"Selected {station} — locking before the dock request, which is the "
+                      + "order the client itself uses.");
+            return true;
+        }
+
+        return (DateTime.UtcNow - _dockLockedAt).TotalMilliseconds < DockLockSettleMs;
+    }
+
     /// <summary>How close to get before asking to dock, when nothing has been learned yet.</summary>
     public float DockApproach { get; set; } = 250f;
 
     /// <summary>Give up on a dock run after this long.</summary>
     public int DockTimeoutSeconds { get; set; } = 90;
+
+    /// <summary>
+    /// The shortest time we will spend at a refuge before its hull trend is allowed to send us
+    /// away. Hysteresis, not a deadline: one burst of damage on arrival must not abandon an
+    /// outpost that is about to let us in.
+    /// </summary>
+    public float DockGiveUpSeconds { get; set; } = 10f;
+
+    /// <summary>
+    /// How much hull we will lose at a refuge before deciding it is not sheltering us.
+    ///
+    /// This replaced a flat 10s timeout, which was wrong in exactly the case it was written for:
+    /// a dock cooldown after combat can run to tens of seconds, and a short timer abandons a good
+    /// outpost while its countdown is still ticking. Whether the shelter is working is a thing we
+    /// can measure — 0.10 is ten points of hull lost since the best reading since arriving.
+    /// </summary>
+    public float RefugeBleedFraction { get; set; } = 0.10f;
 
     public bool IsDocking => _docking;
 
@@ -1449,14 +1972,375 @@ public sealed class FarmBot
         if (!Enabled) _timer.Change(Timeout.Infinite, Timeout.Infinite);
     }
 
-    /// <summary>Launch back into the sector. One message, no approach needed.</summary>
+    /// <summary>
+    /// Get out — of a hangar OR of a carrier, which are different messages.
+    ///
+    /// The client's UNDOCK button tests anchoring FIRST and only reaches <c>Room.Quit</c> if it
+    /// is not set (<c>UndockButton.Undock</c>). Sending the hangar message while riding a carrier
+    /// is the wrong message for the state, which is where this started.
+    /// </summary>
     public void Undock()
     {
         _docking = false;
         _dockTarget = 0;
-        _ = _act.JumpIn();
+        _lastLaunchAsk = DateTime.UtcNow;
+
+        if (_world.Anchored)
+        {
+            _ = _act.RequestUnanchor();
+            Status = "Launching from the carrier";
+            Log?.Invoke($"Unanchor requested — riding #{_world.AnchoredTo:X8}.");
+            return;
+        }
+
+        _ = _act.LeaveRoom();
         Status = "Undocking";
-        Log?.Invoke("Undock requested (JumpIn).");
+        Log?.Invoke("Undock requested (Room.Quit).");
+    }
+
+    // ------------------------------------------------------------------ death & relaunch
+
+    /// <summary>
+    /// Get the ship back out of the hangar by itself: answer the death screen, buy the hull
+    /// condition back, launch, and carry on farming.
+    ///
+    /// Off means a death ends the session in every practical sense — the farm loop keeps ticking
+    /// against a ship that is not in the sector and does nothing at all until someone presses
+    /// Undock.
+    /// </summary>
+    public bool AutoUndock { get; set; } = true;
+
+    /// <summary>Buy the ship's condition back before launching, with titanium. Dying always costs
+    /// condition, and a wrecked hull launches with a fraction of its stats.</summary>
+    public bool AutoRepair { get; set; } = true;
+
+    /// <summary>
+    /// How long to sit in the hangar before launching.
+    ///
+    /// Not politeness: the client has its own death sequence to play out, the repair has to be
+    /// asked for and answered, and the server will not launch a ship it still thinks is dead. Six
+    /// seconds is enough for all three without making a death cost a minute of farming.
+    /// </summary>
+    public int UndockDelaySeconds { get; set; } = 6;
+
+    /// <summary>How long to wait before asking to launch again when the first ask changed nothing.</summary>
+    public int RelaunchIntervalSeconds { get; set; } = 15;
+
+    /// <summary>Times we've been destroyed this session.</summary>
+    public int Deaths { get; private set; }
+
+    /// <summary>Times the bot has bought the hull back this session.</summary>
+    public int RepairsBought { get; private set; }
+
+    /// <summary>True while the ship is out of the sector — dead, docked, or jumping.</summary>
+    public bool InHangar => _hangarSince is not null;
+
+    /// <summary>Condition of the ship we're flying against what its card says it should be, or
+    /// null while either half is unknown.</summary>
+    public (float Now, float Max)? Condition
+    {
+        get
+        {
+            if (_world.MyCondition is not { } now) return null;
+            uint guid = _world.MyShipGuid;
+            if (guid == 0 || Cards.Ship(guid)?.Durability is not { } max || max <= 0) return null;
+            return (now, max);
+        }
+    }
+
+    /// <summary>Whether the hull is worth paying to patch. Null when we cannot tell — no card, or
+    /// no ShipInfo — which is a different answer from "no".</summary>
+    private bool? ConditionShort() =>
+        Condition is { } c ? c.Now < c.Max * 0.999f : null;
+
+    private void OnRespawnOffered(IReadOnlyList<(uint SectorId, uint CarrierPlayerId)> options)
+    {
+        _respawnOffer = options;
+        _lastRespawnOffer = options;
+        _diedHere = true;
+        Log?.Invoke($"Death screen: {options.Count} respawn location(s) offered"
+                  + (AutoUndock ? "." : " — auto undock is off, so pick one in the client."));
+    }
+
+    private void OnShipCondition(ushort shipId, float durability)
+    {
+        if (shipId != _world.MyShipId || !_repairAsked) return;
+
+        // The server answering a repair is the only proof it took it. Comparing against what we
+        // saw before we asked keeps a routine ShipInfo from being read as a successful repair.
+        if (_conditionBeforeRepair is { } was && durability > was + 0.01f)
+        {
+            RepairsBought++;
+            _repairWarned = true;                 // it worked; nothing to warn about
+            string of = Condition is { } c ? $" of {c.Max:F0}" : "";
+            Log?.Invoke($"Repaired: condition {was:F0} → {durability:F0}{of}.");
+        }
+    }
+
+    /// <summary>Forget the whole hangar sequence. Called once the ship is flying again.</summary>
+    private void ClearHangarState()
+    {
+        _hangarSince = null;
+        _respawnOffer = null;
+        // Dropped with the rest: a death screen from an earlier death must never be answered
+        // during an ordinary dock later on.
+        _lastRespawnOffer = null;
+        _respawnAnswered = DateTime.MinValue;
+        _launchAsks = 0;
+        _lastLaunchAsk = DateTime.MinValue;
+        _repairAsked = false;
+        _repairWarned = false;
+        _conditionBeforeRepair = null;
+        _diedHere = false;
+    }
+
+    /// <summary>True while we are riding a carrier rather than flying our own ship.</summary>
+    public bool IsAnchored => _world.Anchored;
+
+    private DateTime? _anchoredSince;
+    private DateTime _lastUnanchorAsk = DateTime.MinValue;
+    private int _unanchorAsks;
+
+    /// <summary>Wait this long after anchoring before asking to launch, so a carrier you boarded
+    /// on purpose is not immediately thrown off it.</summary>
+    public int UnanchorDelaySeconds { get; set; } = 4;
+
+    private void OnAnchorChanged(uint carrier)
+    {
+        if (carrier != 0)
+        {
+            _anchoredSince = DateTime.UtcNow;
+            _lastUnanchorAsk = DateTime.MinValue;
+            _unanchorAsks = 0;
+
+            // Everything we might have had running belongs to a ship we are no longer flying.
+            Weapons.ResetToggles();
+            ForgetThrottle();
+            if (_docking) { _docking = false; _dockTarget = 0; }
+            lock (_gate) { _target = 0; _lockedTarget = 0; }
+
+            var owner = _world.Get(carrier);
+            Log?.Invoke($"Anchored to {(owner is not null ? owner.ToString() : $"#{carrier:X8}")}"
+                      + " — riding, not flying. No steering, no firing, no docking until we launch.");
+            return;
+        }
+
+        _anchoredSince = null;
+        _unanchorAsks = 0;
+        Log?.Invoke("Off the carrier — flying our own ship again.");
+    }
+
+    /// <summary>
+    /// The carrier state. Blocks the farm loop outright and, when farming, asks to launch.
+    ///
+    /// Blocking is the important half. While anchored the client disables its whole ability bar
+    /// and every flight control, because the ship is a passenger — so throttle, heading, casts and
+    /// dock requests are all traffic no real client can produce in that state. The bot sent them
+    /// anyway, for six seconds, ending in a Dock request from inside somebody's Brimir; the server
+    /// closed the connection on the spot.
+    ///
+    /// Returns true whenever we are anchored, so nothing downstream gets the tick.
+    /// </summary>
+    private async Task<bool> AnchorTickAsync()
+    {
+        if (!_world.Anchored) return false;
+
+        var now = DateTime.UtcNow;
+        _anchoredSince ??= now;
+
+        var carrier = _world.Get(_world.AnchoredTo);
+        string riding = carrier is not null ? carrier.ToString() : $"#{_world.AnchoredTo:X8}";
+
+        if (!AutoUndock || !Enabled)
+        {
+            Status = $"Anchored to {riding} — riding along";
+            return true;
+        }
+
+        double waited = (now - _anchoredSince.Value).TotalSeconds;
+        if (waited < UnanchorDelaySeconds)
+        {
+            Status = $"Anchored to {riding} — launching in {UnanchorDelaySeconds - waited:F0}s";
+            return true;
+        }
+
+        if ((now - _lastUnanchorAsk).TotalSeconds >= RelaunchIntervalSeconds)
+        {
+            _lastUnanchorAsk = now;
+            _unanchorAsks++;
+            await _act.RequestUnanchor();
+            Log?.Invoke(_unanchorAsks == 1
+                ? $"Launching from {riding} (RequestUnanchor) to carry on farming."
+                : $"Still aboard {riding} — asking to launch again (attempt {_unanchorAsks}).");
+        }
+
+        Status = $"Launching from {riding}"
+               + (_unanchorAsks > 1 ? $" — asked {_unanchorAsks}x" : "");
+        return true;
+    }
+
+    /// <summary>
+    /// The whole out-of-sector state machine, in the order the server needs it: answer the death
+    /// screen, repair, then launch — and keep asking to launch, because the first ask can land
+    /// while the server still has us dead.
+    ///
+    /// Returns true when it has taken the tick, i.e. the ship is not in the sector and the bot is
+    /// doing something about it.
+    /// </summary>
+    private async Task<bool> HangarTickAsync()
+    {
+        bool inSector = _world.MyObjectId != 0 && _world.MyPositionKnown;
+        if (inSector)
+        {
+            if (_hangarSince is { } since)
+            {
+                Log?.Invoke($"Flying again after {(DateTime.UtcNow - since).TotalSeconds:F0}s out of the sector.");
+
+                // A death does not always arrive as RemoveMe — the ship can leave as a plain
+                // ObjectLeft, in which case OnSectorLeft never ran and every piece of in-flight
+                // bookkeeping survived the grave. The approach watchdog proved it: a
+                // best-distance from the previous life plus a respawn somewhere else read as
+                // "no progress for 38s", and a perfectly good rock was skipped the same second
+                // the new ship entered space. This is the new ship's first tick: whatever the
+                // old one was doing, it is not doing it any more. World knowledge — rocks,
+                // scans, skips — is still true and stays.
+                Weapons.ResetToggles();
+                ForgetThrottle();
+                _mineWatchId = 0;
+                _holdId = 0;
+                _fixWaitSince = DateTime.MinValue;
+                _fixWaitGaveUp = false;
+                _movedAt = DateTime.MinValue;
+                // Locks and subscriptions belong to the dead ship; force both to be re-sent.
+                lock (_gate) { _lockedTarget = 0; _subscribedTarget = 0; }
+
+                ClearHangarState();
+            }
+            return false;
+        }
+
+        // Before the login handshake there is no ship to launch and no hangar to launch it from —
+        // that is the "waiting for the handshake" case, not a docked one.
+        if (_world.MyPlayerId == 0) return false;
+
+        var now = DateTime.UtcNow;
+        _hangarSince ??= now;
+
+        if (!AutoUndock || !Enabled) return false;
+
+        // A death screen blocks everything else: the server will not launch a dead ship, and
+        // nothing else answers this message once the bot is flying.
+        if (_respawnOffer is { Count: > 0 } offer)
+        {
+            // A station, not a stranger's carrier. A carrier id of 0 means the option is a place
+            // of our own; anything else lands us anchored inside another player's ship, which is
+            // a state the bot cannot farm from, cannot leave without their say-so, and used to
+            // fly around inside. Taking offer[0] blindly is how we ended up in a Brimir.
+            var pick = offer.FirstOrDefault(o => o.CarrierPlayerId == 0, offer[0]);
+
+            _respawnOffer = null;
+            _respawnAnswered = now;
+            await _act.SelectRespawnLocation(pick.SectorId, pick.CarrierPlayerId);
+            Log?.Invoke($"Respawning at sector {pick.SectorId}"
+                      + (pick.CarrierPlayerId != 0
+                            ? $" (carrier of player {pick.CarrierPlayerId} — no station was offered)"
+                            : "")
+                      + $" — {offer.Count} location(s) were offered.");
+            Status = "Respawning";
+            return true;
+        }
+
+        // Give the respawn a moment to land before asking the hangar for anything.
+        if (_respawnAnswered != DateTime.MinValue && (now - _respawnAnswered).TotalSeconds < 2)
+        {
+            Status = "Respawning";
+            return true;
+        }
+
+        if (await RepairInHangarAsync(now)) return true;
+
+        double waited = (now - _hangarSince.Value).TotalSeconds;
+        if (waited < UndockDelaySeconds)
+        {
+            Status = $"In the hangar — launching in {UndockDelaySeconds - waited:F0}s";
+            return true;
+        }
+
+        // Three launches ignored means the server is not refusing to undock us — it still has us
+        // dead, and JumpIn is simply the wrong message. Answer the death screen again.
+        if (_launchAsks >= 3 && _lastRespawnOffer is { Count: > 0 }
+            && (now - _respawnAnswered).TotalSeconds > 45)
+        {
+            _respawnOffer = _lastRespawnOffer;
+            _launchAsks = 0;
+            Log?.Invoke("Three launches changed nothing — answering the death screen again.");
+            return true;
+        }
+
+        if ((now - _lastLaunchAsk).TotalSeconds >= RelaunchIntervalSeconds)
+        {
+            _lastLaunchAsk = now;
+            _launchAsks++;
+            await _act.LeaveRoom();
+
+            // The client sends its own JumpIn once the space level has loaded, so ours is only
+            // worth trying after the room has plainly already been left and we are stuck at the
+            // last step instead of the first.
+            if (_launchAsks >= 2) await _act.JumpIn();
+
+            Log?.Invoke(_launchAsks == 1
+                ? "Undocking to carry on farming (Room.Quit)."
+                : $"Still in the hangar — Room.Quit and JumpIn again (attempt {_launchAsks}).");
+        }
+
+        Status = _launchAsks > 1
+            ? $"Undocking — asked {_launchAsks}x, {(now - _hangarSince.Value).TotalSeconds:F0}s in the hangar"
+            : "Undocking";
+        return true;
+    }
+
+    /// <summary>
+    /// Buys the hull back before launching. One RepairAll covers the hull and every fitted system,
+    /// which is what a death damages — repairing the hull alone launches a ship with dead slots.
+    ///
+    /// Returns true while it wants the tick to itself, i.e. it just asked and is waiting.
+    /// </summary>
+    private async Task<bool> RepairInHangarAsync(DateTime now)
+    {
+        if (!AutoRepair || _world.MyShipId == 0) return false;
+
+        if (!_repairAsked)
+        {
+            // Repair when we know it is short, or when we died — dying always costs condition,
+            // and on a server that sends no ShipInfo that is the only signal there is.
+            bool? shortOf = ConditionShort();
+            if (shortOf == false || (shortOf is null && !_diedHere)) return false;
+
+            _repairAsked = true;
+            _repairAskedAt = now;
+            _conditionBeforeRepair = _world.MyCondition;
+
+            // Titanium, never cubits. Cubits are bought with money, and nothing the bot does by
+            // itself should be able to spend them.
+            await _act.RepairAll(_world.MyShipId, useCubits: false);
+            Log?.Invoke(Condition is { } c
+                ? $"Repairing ship {_world.MyShipId} — condition {c.Now:F0}/{c.Max:F0}, paying titanium."
+                : $"Repairing ship {_world.MyShipId} with titanium (condition unknown).");
+            Status = "Repairing";
+            return true;
+        }
+
+        // Asked, and the server never moved the number. Say so once: the likely causes are no
+        // titanium, a hull the server only repairs for cubits, or a server that ignores RepairAll.
+        if (!_repairWarned && (now - _repairAskedAt).TotalSeconds > 8)
+        {
+            _repairWarned = true;
+            if (ConditionShort() != false)
+                Log?.Invoke("Repair didn't take — the server left the condition where it was. "
+                          + "Check titanium, or repair by hand in the damage window.");
+        }
+
+        return false;
     }
 
     private async Task DockTick()
@@ -1469,7 +2353,10 @@ public sealed class FarmBot
             return;
         }
 
-        if ((DateTime.UtcNow - _dockStarted).TotalSeconds > DockTimeoutSeconds)
+        // A countdown the server itself imposed is not the run failing, it is the run working —
+        // so the timeout stands down while one is ticking. A dock delay after combat can be tens
+        // of seconds, which would otherwise abandon a dock that was about to complete.
+        if (!DockCountdownRunning && (DateTime.UtcNow - _dockStarted).TotalSeconds > DockTimeoutSeconds)
         {
             Status = "Gave up docking — took too long";
             Log?.Invoke("Dock run timed out.");
@@ -1491,8 +2378,30 @@ public sealed class FarmBot
 
         await StopThrottleIfMoving();
 
+        // Arrived, but the request itself is the dangerous part — see AllowDocking. The run ends
+        // here rather than pretending to continue, because the ship is where it was asked to be.
+        if (!AllowDocking)
+        {
+            _docking = false;
+            Status = $"At {station} ({dist:F0}u) — not docking, it drops the session";
+            Log?.Invoke($"Arrived at #{station.Id:X8} ({dist:F0}u) but did not send a dock "
+                      + "request: every one the bot has sent ended the session within 400ms. "
+                      + "Dock by hand — the bot reads your request and learns from it — or set "
+                      + "AllowDocking in bot.json.");
+            return;
+        }
+
+        // Selected first, exactly as the client does — see LockBeforeDockAsync.
+        if (await LockBeforeDockAsync(station))
+        {
+            Status = $"At {station} ({dist:F0}u) — selecting it to dock";
+            return;
+        }
+
         // Once per few seconds, not per tick: every rejected attempt writes a line in the
-        // server log with your player id.
+        // server log with your player id. And never inside the server's own countdown, which
+        // disables the real client's dock button for its duration.
+        if (DockCountdownRunning) return;
         if ((DateTime.UtcNow - _dockAsked).TotalSeconds < 4) return;
         _dockAsked = DateTime.UtcNow;
 
@@ -1673,11 +2582,49 @@ public sealed class FarmBot
     /// Neutral whenever either side is factionless, which covers plenty of things that never
     /// shoot at anybody.
     /// </summary>
-    private List<SpaceObj> HostileStations() =>
-        !AvoidHostileStations ? [] :
-        _world.Snapshot()
+    private readonly Lock _stationGate = new();
+    private List<SpaceObj>? _stationCache;
+    private DateTime _stationCacheAt;
+
+    /// <summary>
+    /// Enemy emplacements in the sector, rebuilt at most a few times a second.
+    ///
+    /// The cache is not an optimisation, it is a bug fix. This used to take a full
+    /// <see cref="WorldState.Snapshot"/> — a deep copy of every object in the sector — on every
+    /// single call, and its only caller is <see cref="InStationDanger"/>, which is asked about
+    /// ONE OBJECT AT A TIME from inside predicates that are themselves run over every object:
+    /// <see cref="MiningCandidate"/>, <see cref="CombatCandidate"/>, <see cref="Roam"/>.
+    ///
+    /// So a single "which rock should I mine" pass over 200 contacts did 200 full world copies,
+    /// each holding the world lock. The farm tick and the UI's diagnostics tick both run at
+    /// 250ms, so that was happening eight times a second — enough to peg the UI thread solid
+    /// (the window could not be dragged or raised) and to starve the relay's decode thread of
+    /// the world lock until the server gave up on us and closed the connection.
+    ///
+    /// Stations do not move and rarely change, so half a second of staleness costs nothing.
+    /// </summary>
+    private List<SpaceObj> HostileStations()
+    {
+        if (!AvoidHostileStations) return [];
+
+        var now = DateTime.UtcNow;
+        lock (_stationGate)
+        {
+            if (_stationCache is not null && (now - _stationCacheAt).TotalMilliseconds < 500)
+                return _stationCache;
+        }
+
+        var fresh = _world.Snapshot()
             .Where(o => IsEmplacement(o) && o.HasPosition && _world.RelationTo(o.Id) == Relation.Enemy)
             .ToList();
+
+        lock (_stationGate)
+        {
+            _stationCache = fresh;
+            _stationCacheAt = now;
+        }
+        return fresh;
+    }
 
     /// <summary>True if this object sits inside the reach of an enemy emplacement.</summary>
     private bool InStationDanger(SpaceObj o)
@@ -1754,8 +2701,77 @@ public sealed class FarmBot
         return all;
     }
 
-    /// <summary>The confirmed resource scanner, if you've ever scanned a rock by hand.</summary>
-    private Weapon? Scanner() => Weapons.For(WeaponRole.Scanner).FirstOrDefault();
+    /// <summary>
+    /// The resource scanner to actually use.
+    ///
+    /// There can be more than one candidate, and picking the wrong one is silent and total. A
+    /// scanner learned from a scan reply — the bot watching a cast and an answer land together —
+    /// carries no reach at all, while the one you declared in the loadout panel carries the range
+    /// you typed. Taking whichever came first out of the dictionary is how ability #7, guessed
+    /// and rangeless, shadowed the declared #9 with its 2,000u reach: every scan was then refused
+    /// for want of a range that was sitting right there on the other entry.
+    ///
+    /// So: what you declared beats what was guessed, and a known reach beats an unknown one.
+    /// </summary>
+    private Weapon? Scanner() =>
+        Weapons.For(WeaponRole.Scanner)
+            .OrderByDescending(w => w.RoleFromUser)
+            .ThenByDescending(w => w.MaxRange ?? 0f)
+            .FirstOrDefault();
+
+    /// <summary>
+    /// How far to scan when nothing has published the scanner's reach.
+    ///
+    /// Deliberately short. The server checks the scan against the ability's own
+    /// <c>ObjectStat.MaxRange</c> and simply skips targets beyond it without a word
+    /// (bsgocore <c>ResourceScanAction.internalProcess</c>), so overstating the reach produces
+    /// silent nothing — which is exactly what a 3,000u guess did.
+    /// </summary>
+    public float ScanReachFallback { get; set; } = 600f;
+
+    /// <summary>The furthest a scan has ever actually been ANSWERED from. Measured, so it beats
+    /// every guess: the server only replies for targets inside the ability's real reach.</summary>
+    private float _scanProvenRange;
+
+    /// <summary>
+    /// The radius to scan within.
+    ///
+    /// Three sources, best first. The published stat if there is one. Otherwise the furthest a
+    /// scan has actually been answered from, with a little headroom to keep probing outwards —
+    /// that number can only grow from replies, so it can never overstate the reach by more than
+    /// the headroom. Failing both, a short fallback floored by the mining reach: the rock we are
+    /// about to mine is by definition within the lasers' range, so a scanner that cannot manage
+    /// that distance cannot usefully filter anything anyway.
+    ///
+    /// This replaces refusing to scan at all. The refusal was right about the guess — 3,000u was
+    /// invented — but wrong about the conclusion: a measured distance is not a guess, and no
+    /// scanning at all means no filtering at all, which is what left the bot breaking every rock
+    /// it passed regardless of what you asked for.
+    /// </summary>
+    private float ScanReach()
+    {
+        if (Scanner()?.MaxRange is { } published and > 0) return published;
+
+        var (mineGuns, _) = MiningWeapons();
+        float mining = mineGuns.Count > 0 ? EffectiveRange(mineGuns) : 0f;
+
+        return Math.Max(Math.Max(ScanReachFallback, mining), _scanProvenRange * 1.25f);
+    }
+
+    /// <summary>
+    /// The scanner, but only when it is a scanner that can actually be cast.
+    ///
+    /// Knowing a scanner exists is not the same as being able to use one. <see cref="ScanSweepAsync"/>
+    /// refuses to cast a scanner whose reach nothing has published — rightly, because the server
+    /// silently drops out-of-range scan targets — and that refusal is permanent until a range is
+    /// typed in. Meanwhile the mining loop was holding fire "waiting for the scan", counting
+    /// unanswered casts to decide when to give up, on a scanner that never cast at all. The
+    /// counter therefore never moved, the guns were never released, and the ship sat at full power
+    /// beside a perfectly good rock indefinitely. That is the deadlock in the screenshot.
+    ///
+    /// Anything that stops the scan going out must therefore stop the wait as well.
+    /// </summary>
+    private Weapon? UsableScanner() => ScanReach() > 0 ? Scanner() : null;
 
     // ------------------------------------------------------------------ staying alive
 
@@ -1839,7 +2855,18 @@ public sealed class FarmBot
         // considers out of range, it refuses the cast outright, and a refusal is silent. That is
         // the "cast 3 times with no reply — most likely out of power cells" warning, which had
         // nothing to do with power cells.
-        float range = scanner.MaxRange ?? FallbackRange;
+        //
+        // Which is exactly the argument RequireKnownReach makes for the guns, so the scanner is
+        // held to it too. It used to fall through to FallbackRange regardless — aiming on the
+        // very guess the setting exists to forbid, and manufacturing the silent refusals that
+        // then read as a flat battery.
+        float range = ScanReach();
+
+        if (scanner.MaxRange is not > 0)
+            WarnOnce($"scanner #{scanner.AbilityId} has no published reach — scanning within "
+                   + $"{range:F0}u, which is measured (your mining reach, and the furthest a scan "
+                   + "has actually been answered from) rather than the old 3,000u guess. Type its "
+                   + "real range into the loadout panel to do better.");
 
         // Area scanner: one cast carries every rock in the radius, exactly as the client's own
         // GetObjectsWithinAOE does. In a dense belt this is the difference between 50 power for
@@ -1863,36 +2890,73 @@ public sealed class FarmBot
                 foreach (var id in batch) _scanAsked[id] = now;
 
             Log?.Invoke($"Area scan: {batch.Length} rock(s) in one cast ({range:F0}u).");
-            NoteScanSent();
+            // No per-rock strikes here: one ghost in the batch makes the server refuse the whole
+            // cast, so silence would frame every innocent rock that shared it. The hold watchdog
+            // covers the area case; only the sector-wide counter learns anything from this.
+            NoteScanSent(batch);
             return;
         }
 
         // The rock we're working comes first. Nearest is usually the same rock, but "usually" is
         // what left the guns held: a single-target scanner that keeps answering about something
         // else never unblocks the one target MineAsync is waiting on.
-        var rock = TargetNeedsScan(now) ? _world.Get(CurrentTarget) : null;
-        rock ??= _world.Nearest(o => NeedsScan(o, now) && ScanDue(o.Id, now));
+        //
+        // But only if it is actually in reach. Preferring the target with no fallback meant that
+        // while flying to an unscanned rock — the normal state, since the target is by definition
+        // further away than the scanner can see — the sweep picked that rock, failed the range
+        // test below, and returned having scanned NOTHING, with dozens of unscanned rocks sitting
+        // well inside range the whole way. The ship surveyed nothing while it travelled, so every
+        // rock had to be flown to before it could be identified.
+        bool InReach(SpaceObj o) => (_world.DistanceToMe(o) ?? float.MaxValue) <= range;
+
+        var rock = TargetNeedsScan(now) && _world.Get(CurrentTarget) is { } t && InReach(t) ? t : null;
+        rock ??= _world.Nearest(o => NeedsScan(o, now) && ScanDue(o.Id, now) && InReach(o));
         if (rock is null) return;
-        if ((_world.DistanceToMe(rock) ?? float.MaxValue) > range) return;
+
+        // Enough unanswered casts at THIS rock convicts the rock, not the scanner: a rock that
+        // exists answers, a rock that doesn't swallows the cast without a word. Condemn it
+        // instead of casting a third time — a scan reply is the only thing that could ever make
+        // it mineable, and it has proven it won't give one.
+        int strikes;
+        lock (_gate) strikes = _scanStrikes.GetValueOrDefault(rock.Id);
+        if (strikes >= ScanStrikesBeforeGone)
+        {
+            DropTarget(rock.Id, $"{strikes} scans answered by nothing — the rock is gone",
+                       TimeSpan.FromMinutes(MuteRockSkipMinutes), hard: true);
+            return;
+        }
 
         await _act.CastSlotAbility(scanner.AbilityId, rock.Id);
         scanner.LastFired = now;
         ScansSent++;
-        lock (_gate) _scanAsked[rock.Id] = now;
-        NoteScanSent();
+        lock (_gate)
+        {
+            _scanAsked[rock.Id] = now;
+            _scanStrikes[rock.Id] = strikes + 1;
+        }
+        NoteScanSent(rock.Id);
     }
 
     /// <summary>
     /// Counts casts that went out with no answer. A missing consumable is rejected in
     /// AbilityAction.preFun with no reply of any kind, so "out of power cells" is invisible on
     /// the wire — worth naming explicitly rather than letting it look like a broken scanner.
+    ///
+    /// The warning needs silence across more than one rock. A dead consumable mutes everything;
+    /// one rock swallowing every cast is a rock that no longer exists, and the per-rock strikes
+    /// deal with it without slandering the scanner.
     /// </summary>
-    private void NoteScanSent()
+    private void NoteScanSent(params uint[] rockIds)
     {
+        lock (_gate)
+            foreach (uint id in rockIds) _unansweredRocks.Add(id);
+
         if (++_scansWithoutReply < 3 || _ammoWarned) return;
+        if (_unansweredRocks.Count < 2) return;
         _ammoWarned = true;
-        Log?.Invoke("Scanner has been cast 3 times with no reply. Most likely out of power cells "
-                  + "(the Experimental module burns one per scan), otherwise out of power or out of range.");
+        Log?.Invoke("Scanner has been cast 3 times with no reply across different rocks. Most "
+                  + "likely out of power cells (the Experimental module burns one per scan), "
+                  + "otherwise out of power or out of range.");
     }
 
     /// <summary>
@@ -2005,6 +3069,69 @@ public sealed class FarmBot
         return o is not null && NeedsScan(o, now) && ScanDue(id, now);
     }
 
+    /// <summary>
+    /// True when our own position is an estimate that has had time to go wrong: the server has
+    /// not stated where we are since the last time the ship was under way.
+    ///
+    /// Both halves matter. A fix older than <see cref="SelfPositionTrustSeconds"/> is not by
+    /// itself a problem — a ship parked on a rock for two minutes has a two-minute-old fix and is
+    /// exactly where that fix says, because nothing has moved it. Drift is something a flight
+    /// does. So the test is "have we flown since the server last told us", not "is the fix old".
+    /// </summary>
+    private bool SelfPositionSuspect =>
+        _world.MyFixAgeSeconds > SelfPositionTrustSeconds && _world.MyFixAt < _movedAt;
+
+    /// <summary>
+    /// Stops and waits for the server to say where we actually are, when we are about to commit
+    /// to a decision that only makes sense if we are where we think.
+    ///
+    /// Stopping is not a delay tactic, it is the question: coming to rest is what makes the
+    /// server broadcast a Rest maneuver, and a Rest states a position outright. It is also the
+    /// same thing the caller was about to do anyway — this is the arrival, the throttle was
+    /// coming off regardless. The only cost is the second or two before firing.
+    ///
+    /// Returns true if the caller should stand down this tick.
+    /// </summary>
+    private async Task<bool> ConfirmPositionAsync(DateTime now)
+    {
+        if (!SelfPositionSuspect)
+        {
+            _fixWaitSince = DateTime.MinValue;
+            _fixWaitGaveUp = false;
+            return false;
+        }
+
+        // Already asked and got nothing. Fly on the estimate rather than ask forever — see
+        // SelfPositionWaitSeconds. Re-arms by itself as soon as any fix arrives.
+        if (_fixWaitGaveUp) return false;
+
+        if (_fixWaitSince == DateTime.MinValue)
+        {
+            _fixWaitSince = now;
+            PositionResyncs++;
+        }
+
+        double waited = (now - _fixWaitSince).TotalSeconds;
+        if (waited > SelfPositionWaitSeconds)
+        {
+            _fixWaitGaveUp = true;
+            if (!_fixWaitWarned)
+            {
+                _fixWaitWarned = true;
+                Log?.Invoke($"Stopped for {waited:F0}s and the server never sent a position for "
+                          + "our own ship, so distances are being worked out from dead reckoning "
+                          + "alone. Expect the odd rock to be given up on for being out of reach "
+                          + "when it looked in range.");
+            }
+            return false;
+        }
+
+        await StopThrottleIfMoving();
+        Status = $"Stopped to confirm where we are — the server's last fix is "
+               + $"{_world.MyFixAgeSeconds:F0}s old and we have flown since";
+        return true;
+    }
+
     private async Task MineTick()
     {
         var (lasers, improvised) = MiningWeapons();
@@ -2052,6 +3179,15 @@ public sealed class FarmBot
         float range = lasers.Count > 0 ? EffectiveRange(lasers) : FallbackRange;
         float preferred = StandoffFor(rock, lasers);
 
+        // Say so when the keep-out is what sent us away.
+        //
+        // A rock inside an enemy station's envelope is silently disqualified by MiningCandidate,
+        // and "silently" is the problem: with a 2,100u keep-out and an outpost in the middle of
+        // the belt, every rock you can see out of the cockpit can be excluded at once, and the
+        // bot sets off across the sector with nothing anywhere saying why. It looks broken. It
+        // isn't — but you cannot tell that from the outside, which is just as bad.
+        WarnAboutStationBubble(rock, dist, now);
+
         if (dist > range)
         {
             Meter.Note(MiningActivity.Travelling, now);
@@ -2067,6 +3203,13 @@ public sealed class FarmBot
             }
             return;
         }
+
+        // We believe we have arrived. Everything from here — cutting the throttle, locking, firing
+        // — is worthless if that belief came out of the integrator rather than off the wire, and
+        // the failure is silent: the server refuses an out-of-range cast without saying so, so the
+        // ship sits at the wrong place looking like it is mining until the stall watchdog gives up
+        // on a rock that was never the problem. Prove it first.
+        if (await ConfirmPositionAsync(now)) return;
 
         // A rock doesn't dodge, but accuracy still falls off past optimal range — close in.
         bool closing = AutoApproach && dist > preferred;
@@ -2105,10 +3248,17 @@ public sealed class FarmBot
         // it burns per scan, and holding for it parks the ship at full power next to a perfectly
         // good rock forever. An unenforceable filter is a reason to mine unfiltered and say so
         // loudly, not a reason to stop working.
-        if (Filtering && Scanner() is not null && !KnownContents(rock, DateTime.UtcNow))
+        if (Filtering && UsableScanner() is not null && !KnownContents(rock, DateTime.UtcNow))
         {
             if (ScannerAnswering)
             {
+                // The hold is a state like any other and gets a watchdog like any other. It
+                // used to return here with nothing armed at all, so a rock that could never be
+                // identified held the ship at full power indefinitely.
+                if (WatchHeldFire(rock.Id, now,
+                        "the scan that would identify it never came, so it is gone or "
+                      + "cannot be identified")) return;
+
                 Meter.Note(MiningActivity.Holding, now);
                 await StopAllTogglesAsync();
                 Status = $"Holding fire on #{rock.Id:X8} at {dist:F0}u — waiting for the scan"
@@ -2128,13 +3278,41 @@ public sealed class FarmBot
         var shooting = MiningFireSet(lasers, improvised);
         int fired = await FireAll(shooting, rock, dist, closing);
 
+        // Is any laser actually in a position to shoot right now? Not "did one fire this tick" —
+        // ticks outrun a reload — but "would the gates in FireAll let one through".
+        //
+        // This is the condition the stall watchdog has to be armed on, and getting it wrong is
+        // expensive in both directions. It used to be `!closing`, which disarmed the watchdog for
+        // any rock the ship was still creeping towards — so a rock that no longer existed was
+        // farmed forever, showing "closing to 180u, holding (cooldown)" while nothing happened.
+        // And a naive "arm it whenever we are in range" condemns innocent rocks whenever the guns
+        // are held for want of a known reach or by HoldFireUntilOptimal.
+        bool ableToFire = shooting.Any(w => CanEngage(w, dist, closing));
+        if (!ableToFire)
+        {
+            // The same no-exit shape as the scan hold, and the same cure. Only while parked:
+            // still closing means the state resolves by itself when the band is reached, and a
+            // closing run that goes nowhere is the approach watchdog's case, not this one.
+            if (!closing && WatchHeldFire(rock.Id, now,
+                    "no reach known for any mining slot, or the hold position is outside "
+                  + "every firing band")) return;
+
+            Meter.Note(MiningActivity.Holding, now);
+            Status = $"Holding fire on #{rock.Id:X8} at {dist:F0}u — "
+                   + (shooting.Any(w => !RequireKnownReach || ReachKnown(w))
+                       ? "no mining slot is inside its own firing band yet"
+                       : "no reach known for any mining slot (no server stats, no card, nothing "
+                       + "typed in) — fill it in on the loadout panel");
+            return;
+        }
+
         // Is anything actually coming off it? Casts leaving the ship are not evidence — the
         // server refuses a cast at an object that is gone, silently.
         //
         // The condition is "in position and working it", NOT "cast something this tick". Ticks
         // are faster than a half-second reload, so most of them legitimately fire nothing, and
         // watching `fired` would reset the clock every other tick and never reach the timeout.
-        if (WatchMining(rock, !closing && shooting.Count > 0, now))
+        if (WatchMining(rock, ableToFire, now))
         {
             await StopAllTogglesAsync();
             return;
@@ -2152,6 +3330,43 @@ public sealed class FarmBot
         Status = $"Mining #{rock.Id:X8} — {dist:F0}u / {range:F0}u, {what}"
                + (fired > 0 ? $", {fired} {gun} firing" : ", holding (cooldown)")
                + (closing ? $", closing to {preferred:F0}u" : "");
+    }
+
+    private DateTime _bubbleWarnedAt = DateTime.MinValue;
+
+    /// <summary>
+    /// Reports how much mining the hostile-station keep-out is costing, when it is costing any.
+    ///
+    /// Only fires when we are about to travel — if the chosen rock is close, the keep-out is not
+    /// hurting and there is nothing to say. Rate-limited to once a minute, because the situation
+    /// persists for as long as the ship is near the station and this must not become a flood.
+    /// </summary>
+    private void WarnAboutStationBubble(SpaceObj chosen, float dist, DateTime now)
+    {
+        if (!AvoidHostileStations) return;
+        if (dist < LocalRadius) return;
+        if ((now - _bubbleWarnedAt).TotalSeconds < 60) return;
+
+        var stations = HostileStations();
+        if (stations.Count == 0) return;
+
+        int blocked = _world.Snapshot().Count(o => EntityTypes.IsMinable(o.Id)
+                                                && o.MiningCooldown <= now
+                                                && !IsCorpse(o)
+                                                && InStationDanger(o));
+        if (blocked == 0) return;
+
+        _bubbleWarnedAt = now;
+        var nearest = stations.OrderBy(s => _world.DistanceToMe(s) ?? float.MaxValue).First();
+        // Naming the faction, because "WeaponPlatform" alone reads like the bot mistook your own
+        // outpost for a gun. The type and the faction both come out of the object id itself
+        // (SectorFactory / SpaceObject.ExtractFaction) — an Ancient or Cylon platform parked next
+        // to a friendly outpost is a different object from the outpost, and the client calls it
+        // an enemy by exactly the same rule this does.
+        Log?.Invoke($"{blocked} asteroid(s) are inside the {HostileStationKeepOut:F0}u keep-out "
+                  + $"around {nearest} ({EntityTypes.FactionOf(nearest.Id)}, "
+                  + $"{_world.RelationTo(nearest.Id)}) — skipping them and travelling {dist:F0}u "
+                  + "instead. Lower KEEP OFF GUNS, or turn off \"Avoid stations\", to mine them.");
     }
 
     /// <summary>True when the scanner identifies a whole field in one cast rather than one rock.
@@ -2174,14 +3389,46 @@ public sealed class FarmBot
     /// </summary>
     private SpaceObj? NearestTarget(DateTime now)
     {
-        bool Wanted(SpaceObj o) => MiningCandidate(o) && KnownContents(o, now);
-        bool Unidentified(SpaceObj o) => MiningCandidate(o) && !KnownContents(o, now);
+        bool Any(SpaceObj o) => MiningCandidate(o);
+        bool Wanted(SpaceObj o) => Any(o) && KnownContents(o, now);
 
-        // `keep` is the same test, deliberately: with nearest-first there is no priority order to
-        // be pulled off a half-mined rock by, so the only reason to let go is that the rock has
-        // stopped qualifying at all.
-        return ResolveTarget(Wanted, honourPin: true, keep: Wanted)
-            ?? ResolveTarget(Unidentified, honourPin: true, keep: Unidentified);
+        // Confirmed beats unconfirmed, then nearest wins within each. A rock we KNOW holds what
+        // you asked for is worth more than one that might hold anything, and taking the nearest
+        // of the confirmed set means this can never be the reason the ship travels far — if a
+        // confirmed rock is close, it is the one chosen.
+        //
+        // Bounded to the scanner's own reach first: everything inside it is knowable from where
+        // we stand, everything outside is a journey. Only when nothing within reach qualifies at
+        // all does the unbounded pass below run.
+        float local = LocalRadius;
+        var localWanted = Bounded(Wanted, local);
+        var localAny = Bounded(Any, local);
+
+        // An unconfirmed held target is a guess, and a guess loses to knowledge: while anything
+        // confirmed-and-wanted sits within local reach, keeping the guess is what parked the
+        // ship on an unidentifiable rock with a rock KNOWN to hold what you asked for waiting in
+        // the queue. A confirmed held target is still kept unconditionally — a worked rock is
+        // finished, not churned. No oscillation is possible: the confirmed pass runs first and
+        // its own pick passes this test, so the swap happens once and then holds.
+        bool confirmedNearby = _world.Nearest(localWanted) is not null;
+        bool Keep(SpaceObj o) => Any(o) && (KnownContents(o, now) || !confirmedNearby);
+
+        if (confirmedNearby || _world.Nearest(localAny) is not null)
+            return ResolveTarget(localWanted, honourPin: true, keep: Keep)
+                ?? ResolveTarget(localAny, honourPin: true, keep: Keep);
+
+        // Nothing within reach, so the sector is the search area — this is the trip that has to
+        // be made before anything else can happen.
+        //
+        // `keep` stays LOOSER than each pass's own candidate, never stricter. Two passes over a
+        // shared `_target` where the first pass's test is stricter than `keep` is what caused
+        // the earlier churn: the strict pass rejected the held rock and cleared `_target`, the
+        // looser pass immediately re-picked it, every tick — four "Engaging" log lines a second
+        // and a LockTarget re-sent to the server at the same rate. The one thing Keep adds over
+        // the raw candidate test is the confirmed-nearby eviction, and that is one-shot by
+        // construction, not a churn.
+        return ResolveTarget(Wanted, honourPin: true, keep: Keep)
+            ?? ResolveTarget(Any, honourPin: true, keep: Keep);
     }
 
     /// <summary>
@@ -2247,8 +3494,13 @@ public sealed class FarmBot
     /// </summary>
     private SpaceObj? Roam(DateTime now)
     {
+        // A hard skip is still honoured. Those are rocks we measured as unworkable — twenty
+        // seconds of fire for no damage and no ore — and flying back to one is the loop the
+        // mining watchdog exists to break.
         var unknown = _world.Nearest(o => EntityTypes.IsMinable(o.Id)
                                        && o.MiningCooldown <= now
+                                       && !IsSkipped(o.Id, _hardSkip)
+                                       && !IsCorpse(o)
                                        && !InStationDanger(o)
                                        && !KnownContents(o, now));
         if (unknown is null) return null;
@@ -2257,6 +3509,15 @@ public sealed class FarmBot
         // there anyway, clear them, or it is rejected again the moment it has been scanned.
         int cleared;
         lock (_gate) { cleared = _skip.Count; _skip.Clear(); }
+
+        // Adopted as the real target, not just flown at. Roaming used to bypass ResolveTarget
+        // entirely, which left _target at 0 — so the scan gate could not see that the rock we
+        // were on our way to still needed identifying, and DropTarget had nothing to clear if
+        // it turned out to be a ghost.
+        lock (_gate)
+        {
+            if (_target != unknown.Id) { _target = unknown.Id; _lockedTarget = 0; }
+        }
 
         if (_roamTarget != unknown.Id)
         {
@@ -2315,8 +3576,7 @@ public sealed class FarmBot
     /// the radius the ship can survey without moving — everything inside it is knowable from
     /// where we stand, and everything outside is a journey.
     /// </summary>
-    private float LocalRadius =>
-        Scanner()?.MaxRange is { } r and > 0 ? r : FallbackRange;
+    private float LocalRadius => ScanReach();
 
     /// <summary>The same test, but only for contacts within <paramref name="radius"/>.</summary>
     private Func<SpaceObj, bool> Bounded(Func<SpaceObj, bool> inner, float radius) =>
@@ -2331,6 +3591,15 @@ public sealed class FarmBot
                                          && (_world.DistanceToMe(o) ?? float.MaxValue) <= radius);
     }
 
+    /// <summary>
+    /// An object the server still lists but has already destroyed.
+    ///
+    /// <see cref="SpaceObj.Hull"/> defaults to 1 and only carries meaning once the server has
+    /// streamed it, hence the <see cref="SpaceObj.StatsKnown"/> guard — otherwise every object
+    /// we have never subscribed to would read as alive-by-default, which is the safe direction.
+    /// </summary>
+    private static bool IsCorpse(SpaceObj o) => o.StatsKnown && o.Hull <= 0f;
+
     private bool MiningCandidate(SpaceObj o)
     {
         if (!EntityTypes.IsMinable(o.Id)) return false;
@@ -2338,6 +3607,20 @@ public sealed class FarmBot
 
         var now = DateTime.UtcNow;
         if (o.MiningCooldown > now) return false;
+
+        // A corpse. The server does not always send a removal for a rock that has been broken
+        // open — it just stops existing as far as the game is concerned while its object lingers
+        // in our world model — but it DOES stream the hull, and a hull of zero is unambiguous.
+        //
+        // Nothing checked this, so the bot would happily pick a rock it had itself destroyed
+        // minutes earlier and fly a thousand units to it, then sit there "closing" on nothing.
+        // The mining watchdog could not save it either: that only arms once the ship is in
+        // position and able to fire, and a ship still flying towards a ghost never gets there.
+        //
+        // Guarded on StatsKnown because Hull defaults to 1 and only means anything once the
+        // server has actually streamed it — which, for mining, it now does, because the target
+        // is subscribed.
+        if (IsCorpse(o)) return false;
 
         // NOT gated on SpaceObj.IsMinable. The flag in Reply.Scan answers "can a mining ship be
         // ordered here", which the server only ever sets for planetoids — every ordinary
@@ -2382,6 +3665,25 @@ public sealed class FarmBot
     private bool ReachKnown(Weapon w) => w.MaxRange is > 0;
 
     /// <summary>
+    /// Whether this weapon is in a position to fire at <paramref name="distance"/>, ignoring
+    /// cooldown and power — i.e. everything about the geometry and nothing about the clock.
+    ///
+    /// Single source of truth on purpose. <see cref="FireAll"/> decides whether to pull the
+    /// trigger and <see cref="WatchMining"/> decides whether the absence of damage is the rock's
+    /// fault; when those two disagreed, the watchdog condemned rocks the guns were never allowed
+    /// to shoot at in the first place.
+    /// </summary>
+    private bool CanEngage(Weapon w, float distance, bool stillClosing)
+    {
+        if (RequireKnownReach && !ReachKnown(w)) return false;
+        if (w.MaxRange is { } max && distance > max) return false;
+        if (w.MinRange is { } min && distance < min) return false;
+        if (HoldFireUntilOptimal && stillClosing
+            && w.OptimalRange is { } opt && opt > 0 && distance > opt) return false;
+        return true;
+    }
+
+    /// <summary>
     /// The distance we actually want to fight from, which is not the same as the distance we
     /// can reach. A cannon's accuracy is quoted at its OptimalRange — the FANG reaches 750u but
     /// is only accurate at 300 — so parking at the edge of max range means missing nearly every
@@ -2423,8 +3725,33 @@ public sealed class FarmBot
         {
             // Told, not guessed. Still clamped to weapon reach — a hold position we can't shoot
             // from would just park the ship next to a rock forever.
+            //
+            // Floored by the same clearance the collision code uses, exactly as the planetoid
+            // case below is. Without it the approach aimed for a flat 180u while the avoidance
+            // considered anything inside 183u a collision, so the two pulled against each other
+            // for as long as the bot was pointed at the rock: closing, shoved out, closing again,
+            // never in position, never firing. A standoff the avoidance will not permit is not a
+            // standoff.
             case SpaceEntityType.Asteroid when AsteroidStandoff > 0:
-                return Math.Min(AsteroidStandoff, reach * 0.95f);
+            {
+                // A gap to the SURFACE, plus the rock's own radius — not a distance from its
+                // centre. Centre-to-centre made the setting meaningless: it was floored by
+                // radius + margin, so on any rock bigger than the number you typed the floor won
+                // and typing 50 changed nothing you could see.
+                float gap = target.Radius + AsteroidStandoff;
+
+                // And never exactly ON the clearance sphere, which is what the old
+                // Max(standoff, ClearanceOf) produced whenever the floor won. Park on the
+                // boundary and the rock counts as "in the way" the instant it stops being the
+                // target — one drift, one rotation, one re-target and the ship is suddenly
+                // escaping the thing it was mining a moment ago. That is the churn in the log:
+                // engage at 168u, then "0u of room left ahead" against the very same rock.
+                float floor = ClearanceOf(target) * StandoffMargin;
+
+                // Reach still caps it, but never below the floor: a firing position we would
+                // treat as a collision is not a firing position.
+                return Math.Clamp(Math.Max(gap, floor), floor, Math.Max(reach * 0.95f, floor));
+            }
 
             // Not clamped to weapon reach: a planetoid is worked by ordering a mining ship, not by
             // shooting it, so there is nothing to stay in range of. It IS floored by the body's
@@ -2503,21 +3830,11 @@ public sealed class FarmBot
         {
             if (!CastAllowed(w.AbilityId, target.Id)) continue;
 
-            // No known reach means no idea whether this shot can land. The server answers an
-            // over-range cast with silence, so firing anyway spends the cooldown and teaches us
-            // nothing. Every real source — live stats, the catalogue, your own declaration —
-            // has to have come up empty for this to trigger.
             if (RequireKnownReach && !ReachKnown(w))
-            {
                 WarnOnce($"ability #{w.AbilityId} has no known reach from stats, the catalogue "
                        + "or your loadout — holding fire rather than guessing.");
-                continue;
-            }
 
-            if (w.MaxRange is { } max && distance > max) continue;
-            if (w.MinRange is { } min && distance < min) continue;
-            if (HoldFireUntilOptimal && stillClosing
-                && w.OptimalRange is { } opt && opt > 0 && distance > opt) continue;
+            if (!CanEngage(w, distance, stillClosing)) continue;
             if (!CanAfford(w)) continue;
 
             // Rate cap, and the reason it exists: this used to fire every gun in the same
@@ -2560,7 +3877,14 @@ public sealed class FarmBot
 
             // Booked before the server answers, because the answer carries no range: a hit
             // report says what we did, never where we were standing when we did it.
-            Fights.NoteShotFired(w.AbilityId, target.Id, distance, ThrottleFraction);
+            //
+            // Rocks excluded. The curve being built is hit rate against a target's avoidance,
+            // and an asteroid has none — it cannot be missed. Worse, a mining hit may not come
+            // back as CombatInfo at all, so every laser shot would age out as a miss and, since
+            // mining fires far more shots than combat ever does, the whole table would end up
+            // describing the lasers rather than the guns.
+            if (!EntityTypes.IsMinable(target.Id))
+                Fights.NoteShotFired(w.AbilityId, target.Id, distance, ThrottleFraction);
         }
 
         return firing;
@@ -2783,7 +4107,12 @@ public sealed class FarmBot
         if (next is null) return null;
 
         lock (_gate) { _target = next.Id; }
-        Log?.Invoke($"Engaging {next} at {_world.DistanceToMe(next):F0}u");
+
+        // Only when it is genuinely a different target. Re-selecting the same object is not news,
+        // and a caller that re-picks every tick would otherwise fill the log at four lines a
+        // second — which is how the churn above stayed invisible for so long.
+        if (next.Id != current)
+            Log?.Invoke($"Engaging {next} at {_world.DistanceToMe(next):F0}u");
         return next;
     }
 
@@ -2850,6 +4179,19 @@ public sealed class FarmBot
     private void Skip(uint id, TimeSpan how) { lock (_gate) _skip[id] = DateTime.UtcNow + how; }
 
     /// <summary>
+    /// A skip <see cref="Roam"/> is not allowed to forget.
+    ///
+    /// The ordinary skip list is a set of beliefs that go stale — "this approach stalled", "this
+    /// looked depleted" — and roaming drops all of them on purpose, because sitting still is
+    /// worse than re-checking something. But a rock the mining watchdog gave up on is not a
+    /// stale belief, it is a measurement: twenty seconds of firing produced no damage and no
+    /// ore. Putting it in the same list meant roaming wiped it and immediately picked the same
+    /// ghost rock again, since roaming deliberately ignores skips — watchdog fires, roam
+    /// forgets, watchdog fires, forever.
+    /// </summary>
+    private void SkipHard(uint id, TimeSpan how) { lock (_gate) _hardSkip[id] = DateTime.UtcNow + how; }
+
+    /// <summary>
     /// Give up on a target, for a reason, and make the decision stick.
     ///
     /// Clearing <see cref="_target"/> alone was never enough. A pin outranks every targeting rule
@@ -2858,7 +4200,9 @@ public sealed class FarmBot
     /// was re-selected on the very next tick, forever, and selecting something else by hand did
     /// not survive one tick either. Deciding a target is no good has to release the pin too.
     /// </summary>
-    private void DropTarget(uint id, string why, TimeSpan? skipFor = null)
+    /// <param name="hard">Whether the skip survives roaming. True when we MEASURED that the
+    /// target is no good, rather than merely believing it.</param>
+    private void DropTarget(uint id, string why, TimeSpan? skipFor = null, bool hard = false)
     {
         bool unpinned;
         lock (_gate)
@@ -2868,9 +4212,10 @@ public sealed class FarmBot
             if (_target == id) { _target = 0; _lockedTarget = 0; }
         }
 
-        if (skipFor is { } how) Skip(id, how);
+        if (skipFor is { } how) { if (hard) SkipHard(id, how); else Skip(id, how); }
         _approachId = 0;
         _mineWatchId = 0;
+        _holdId = 0;
 
         Log?.Invoke($"Dropped #{id:X8} — {why}."
                   + (unpinned ? " Pin released; picking targets automatically again." : ""));
@@ -2921,17 +4266,49 @@ public sealed class FarmBot
         if ((now - _mineProgressAt).TotalSeconds < MiningStallSeconds) return false;
 
         DropTarget(rock.Id, $"{MiningStallSeconds:F0}s of firing with no damage dealt and no ore "
-                          + "banked — it is gone, or we cannot reach it", TimeSpan.FromMinutes(5));
+                          + "banked — it is gone, or we cannot reach it",
+                   TimeSpan.FromMinutes(5), hard: true);
         return true;
     }
 
-    private bool IsSkipped(uint id)
+    /// <summary>
+    /// Returns true when the ship has been engaged on one rock, with no shot possible, for long
+    /// enough that the engagement itself is the problem. The stall watchdog cannot cover this:
+    /// it deliberately disarms while the guns are not firing, so every hold state — waiting for
+    /// a scan, no known reach, parked outside the firing bands — was a state with no exit.
+    ///
+    /// Self-arming and self-forgetting: the clock runs only across CONSECUTIVE held ticks, so an
+    /// interruption — combat, travel, a different target — starts a fresh count instead of
+    /// inheriting a stale one and condemning a rock the moment the hold resumes. The clock is
+    /// shared across the hold reasons on purpose: a rock that alternates between "waiting for
+    /// the scan" and "outside the band" has still produced nothing the whole time.
+    /// </summary>
+    private bool WatchHeldFire(uint rockId, DateTime now, string why)
+    {
+        if (_holdId != rockId || (now - _holdSeen).TotalSeconds > 2)
+        {
+            _holdId = rockId;
+            _holdSince = now;
+        }
+        _holdSeen = now;
+
+        if ((now - _holdSince).TotalSeconds < HeldFirePatienceSeconds) return false;
+
+        DropTarget(rockId, $"engaged {HeldFirePatienceSeconds:F0}s without a single shot possible "
+                         + $"— {why}",
+                   TimeSpan.FromMinutes(MuteRockSkipMinutes), hard: true);
+        return true;
+    }
+
+    private bool IsSkipped(uint id) => IsSkipped(id, _skip) || IsSkipped(id, _hardSkip);
+
+    private bool IsSkipped(uint id, Dictionary<uint, DateTime> list)
     {
         lock (_gate)
         {
-            if (!_skip.TryGetValue(id, out var until)) return false;
+            if (!list.TryGetValue(id, out var until)) return false;
             if (until > DateTime.UtcNow) return true;
-            _skip.Remove(id);
+            list.Remove(id);
             return false;
         }
     }
@@ -3025,6 +4402,20 @@ public sealed class FarmBot
         gear == Gear.Boost && BoostSpeed > 0f ? BoostSpeed : TopSpeed;
 
     /// <summary>
+    /// How far out a target has to be before boosting to it is worth doing — the distance the
+    /// ship needs to arrive at the hold position under control.
+    ///
+    /// Both terms are measured at BOOST speed, deliberately. This is the decision "is there room
+    /// to run fast and still stop", so it has to be answered against the fast case, not against
+    /// the cruise the ship happens to be in while asking.
+    /// </summary>
+    private float BoostRunway(float stopRange)
+    {
+        float brake = Math.Clamp(BoostSpeed * BrakingSeconds, MinBrakeDistance, BrakingDistance);
+        return stopRange + brake + BoostSpeed * BoostShedSeconds;
+    }
+
+    /// <summary>
     /// Points the ship at the target and opens the throttle. Same messages the client sends
     /// when you fly manually: a heading (Euler3.Direction of the offset), an absolute speed,
     /// and a gear.
@@ -3044,7 +4435,7 @@ public sealed class FarmBot
         // how far a second is depends on which gear we're in. It needs nothing but the distance,
         // so there is no circularity — and if an obstacle forces Regular later, the zones stay
         // sized for boost, which errs towards more room rather than less.
-        var gear = UseBoost && BoostSpeed > 0f && distance > stopRange + BoostMargin
+        var gear = UseBoost && BoostSpeed > 0f && distance > BoostRunway(stopRange)
             ? Gear.Boost
             : Gear.Regular;
         float flying = SpeedInGear(gear);
@@ -3099,7 +4490,15 @@ public sealed class FarmBot
         // approach worth being unable to turn out of.
         if (blocker is not null)
         {
-            throttle = Math.Min(throttle, ThrottlePastObstacle(blocker, gap, brakeZone));
+            // Getting OUT of something outranks arriving at something. The old line took the
+            // minimum of the two, so a ship inside a big rock's clearance sphere — gap 0, taper
+            // 0, throttle pinned to MinApproachSpeed — crawled its way out over tens of seconds
+            // while the mining brake held it down as well. That is the wedge: the one state where
+            // the ship is definitely in the wrong place is the state it left at walking pace.
+            throttle = blocker.Id == _escapeFrom
+                ? EscapeThrottle(blocker, now)
+                : Math.Min(throttle, ThrottlePastObstacle(blocker, gap, brakeZone));
+
             gear = Gear.Regular;
             NoteDodge(blocker, gap, now);
         }
@@ -3157,6 +4556,11 @@ public sealed class FarmBot
 
             var toObs = o.PredictedPosition(now) - me;
             float clear = ClearanceOf(o);
+
+            // Hysteresis on the one we are getting out of: it counts as "inside" until we are
+            // clear of it by a margin. Leaving on the exact boundary is what let the ship exit a
+            // big rock's sphere and be aimed straight back into it on the very next tick.
+            if (o.Id == _escapeFrom) clear *= EscapeClearance;
 
             // Already inside it. Tested before anything about our heading, because once the ship
             // is within a big body's clearance sphere the direction it is pointing stops being
@@ -3226,7 +4630,11 @@ public sealed class FarmBot
         if (desired.LengthSquared() < 1f) return desired;
 
         var blocker = BlockerAhead(desired, lookahead, ignoreId, now, out _);
-        if (blocker is null) return desired;
+        if (blocker is null)
+        {
+            _escapeFrom = 0;
+            return desired;
+        }
 
         var me = _world.MyPosition;
         var dir = Vector3.Normalize(desired);
@@ -3235,6 +4643,7 @@ public sealed class FarmBot
 
         float along = Vector3.Dot(toObs, dir);
         float clear = ClearanceOf(blocker);
+        if (blocker.Id == _escapeFrom) clear *= EscapeClearance;
 
         // Inside it: there is no "around" to steer, only "out". Straight away from the centre is
         // the shortest way back to open space, and it is the one heading that is guaranteed to
@@ -3242,9 +4651,13 @@ public sealed class FarmBot
         float centre = toObs.Length();
         if (centre < clear)
         {
+            if (_escapeFrom != blocker.Id) { _escapeFrom = blocker.Id; _escapeSince = now; }
             deflected = true;
             return centre > 1f ? -toObs / centre * clear : SidestepAxis(dir) * clear;
         }
+
+        // Out, with the margin to prove it.
+        if (_escapeFrom == blocker.Id) _escapeFrom = 0;
 
         // Push the aim to whichever side our path already favours: that is the smaller course
         // change, and it keeps the deflection stable instead of flip-flopping between the two
@@ -3266,6 +4679,22 @@ public sealed class FarmBot
         // A degenerate aim used to fall back to `desired`, which points into the thing we are
         // dodging. The tangent is always the safer answer.
         if (aim.LengthSquared() < 1f) aim = side * clear;
+
+        // One second opinion, because in a belt the shortest way round one rock is very often
+        // straight into the next one. The ship then brakes for THAT one, deflects back, and
+        // oscillates between the pair at a crawl — which is what "0u of room left ahead" every
+        // few seconds against two different asteroids actually was.
+        //
+        // The other way round is only taken when it is genuinely clear; swapping to a second
+        // blocked path would just move the wedge, and a coin flip between two bad headings is
+        // worse than committing to one.
+        if (BlockerAhead(aim, lookahead, ignoreId, now, out _) is { } second && second.Id != blocker.Id)
+        {
+            var other = obs - side * (clear * 1.25f) + dir * clear - me;
+            if (other.LengthSquared() >= 1f
+                && BlockerAhead(other, lookahead, ignoreId, now, out _) is null)
+                aim = other;
+        }
 
         deflected = true;
         return aim;
@@ -3306,21 +4735,105 @@ public sealed class FarmBot
         return Math.Max(TopSpeed * MathF.Sqrt(t), MinApproachSpeed);
     }
 
+    /// <summary>How far past an obstacle's clearance to get before we stop calling ourselves
+    /// inside it. Pure hysteresis: it exists so leaving is a decision, not a boundary case.</summary>
+    public float EscapeClearance { get; set; } = 1.25f;
+
     /// <summary>
-    /// How much room a solid object needs, measured from its centre.
+    /// Throttle while backing out of something we are already inside.
     ///
-    /// The published radius is a bounding figure rather than the visual hull, which is why
-    /// <see cref="RadiusClearance"/> exists and why every standoff in the bot multiplies by it.
-    /// The collision code did not, and used a bare <c>Radius + CollisionMargin</c> instead — so
-    /// the two halves of the same program disagreed about how big things are.
-    ///
-    /// On an asteroid the two answers are close enough that nothing ever showed. On a planetoid
-    /// they are not: a 900u body reads as needing 1,030u of room by one formula and 2,850u by the
-    /// other, so the avoidance happily plotted courses through the outer two thirds of it. That
-    /// size dependence is the whole reason this failed on planetoids and never on rocks.
+    /// The ordered heading here points directly away from the obstacle, so speed is the cure and
+    /// not the danger — the faster we go, the sooner we are somewhere the normal rules work
+    /// again. The one exception is momentum still carrying us inwards: the ship has to turn
+    /// before it can leave, and full throttle through that turn puts us deeper first.
     /// </summary>
-    private float ClearanceOf(SpaceObj o) =>
-        o.Radius > 0 ? o.Radius * RadiusClearance + CollisionMargin : CollisionMargin;
+    private float EscapeThrottle(SpaceObj blocker, DateTime now)
+    {
+        var away = _world.MyPosition - blocker.PredictedPosition(now);
+        var vel = _world.MyVelocity;
+
+        bool leaving = vel.LengthSquared() < 1f || Vector3.Dot(vel, away) > 0f;
+        return leaving ? TopSpeed : Math.Max(TopSpeed * 0.5f, MinApproachSpeed);
+    }
+
+    /// <summary>
+    /// How much room a solid object needs to be flown PAST, measured from its centre.
+    ///
+    /// Deliberately not <see cref="RadiusClearance"/>. That multiplier (×3) is a *standoff*
+    /// figure — where to park when you have a choice — and it was briefly used here on the
+    /// argument that the two halves of the program should agree about how big things are. They
+    /// should not: parking beside a body and threading between bodies are different questions,
+    /// and answering the second with the first is what broke mining.
+    ///
+    /// A 53u rock went from needing 183u of room to needing 289u. In a belt of 130 asteroids that
+    /// means the ship is permanently inside somebody's exclusion sphere, so every tick reported
+    /// "0u of room left ahead", clamped the throttle to a crawl and pushed the heading outward.
+    /// It could not cross its own asteroid field. The rock it was aiming at then failed the
+    /// approach watchdog, got skipped, and the same thing happened to the next one — until every
+    /// rock nearby was skipped and the nearest survivor was eight thousand units away.
+    ///
+    /// The planetoid ram that started all this is fixed by the three changes that actually
+    /// address it — the already-inside test, the size-scaled lookahead, and leading the aim past
+    /// the obstacle — none of which need the radius inflated.
+    /// </summary>
+    /// <remarks>
+    /// Split by what the body actually is, because one number cannot serve both ends of a range
+    /// that spans two orders of magnitude. A flat +70u on an 18u pebble is a no-go sphere five
+    /// times the rock's own size, and in a belt of those the ship is permanently inside somebody's
+    /// — that is the "35u of room left ahead" churn. The same +70u on a 1,500u planetoid is 4% of
+    /// its radius, which is no margin at all on something you arrive at doing 80u/s.
+    ///
+    /// So: asteroids get their real collider and a small ship-sized margin; planetoids get a
+    /// proportional one. Everything else — ships, stations, debris — keeps the old flat rule.
+    /// </remarks>
+    private float ClearanceOf(SpaceObj o)
+    {
+        float r = o.Radius > 0 ? o.Radius : 0f;
+
+        return EntityTypes.Of(o.Id) switch
+        {
+            // The server builds an asteroid's collider as a sphere of radius * 0.9 (bsgocore
+            // SpaceObjectFactory.createAsteroid), so the published radius is generous already and
+            // the margin only has to cover our own hull.
+            SpaceEntityType.Asteroid =>
+                r * AsteroidColliderFactor + Math.Max(AsteroidCollisionMargin, MyRadius),
+
+            // Proportional, because a planetoid's published radius is the one figure that is
+            // definitely not conservative, and hitting one is not a scrape.
+            SpaceEntityType.Planetoid =>
+                r * PlanetoidClearanceFactor + Math.Max(PlanetoidCollisionMargin, MyRadius * 2f),
+
+            _ => r + SafetyMargin,
+        };
+    }
+
+    /// <summary>The server's own asteroid collider is <c>radius * 0.9</c>. Not a tunable: it is
+    /// a fact about the server, and pretending a rock is bigger than the thing that can hit us is
+    /// what the margin is for.</summary>
+    private const float AsteroidColliderFactor = 0.9f;
+
+    /// <summary>
+    /// Room to leave around a solid body, on top of its own radius.
+    ///
+    /// The radius on the wire is very close to the real thing — the server builds an asteroid's
+    /// collider as a sphere of <c>radius * 0.9</c> (bsgocore <c>SpaceObjectFactory.createAsteroid</c>)
+    /// — so the margin is the ship's problem, not the rock's. A flat 130u was most of a small
+    /// rock's no-go zone all by itself: a 38u asteroid became a 168u sphere, four times its own
+    /// size, and in a belt of those the ship is permanently inside somebody's.
+    ///
+    /// Floored by twice our own hull, which is the number the margin is actually for.
+    /// </summary>
+    private float SafetyMargin => Math.Max(CollisionMargin, MyRadius * 2f);
+
+    /// <summary>Our own half-size, from our hull's World card. 0 until the card arrives.</summary>
+    private float MyRadius
+    {
+        get
+        {
+            uint guid = _world.Get(_world.MyObjectId)?.CardGuid ?? 0;
+            return guid == 0 ? 0f : Cards.World(guid)?.Radius ?? 0f;
+        }
+    }
 
     /// <summary>One line per obstacle, not one per tick — a dodge lasts several seconds and the
     /// log is meant to be readable.</summary>
@@ -3330,7 +4843,63 @@ public sealed class FarmBot
         _dodgeId = blocker.Id;
         _dodgeSince = now;
         NearMisses++;
-        Log?.Invoke($"Braking and steering around {blocker} — {gap:F0}u of room left ahead.");
+
+        // The two states read identically in the old wording — "0u of room left ahead" was
+        // printed both for a rock we were about to hit and for one we were already inside, which
+        // are opposite problems with opposite cures.
+        Log?.Invoke(blocker.Id == _escapeFrom
+            ? $"Inside {blocker}'s clearance ({ClearanceOf(blocker):F0}u) — backing out at speed."
+            : $"Braking and steering around {blocker} — {gap:F0}u of room left ahead.");
+    }
+
+    /// <summary>
+    /// Circles a body at a set radius, at running speed.
+    ///
+    /// This is what waiting at a refuge looks like when something is shooting at us. Parking is
+    /// the obvious thing to do at a door and the wrong one: a stationary ship is the easiest shot
+    /// in the game, and the dock we are waiting on may be on a cooldown of tens of seconds after
+    /// combat. Circling keeps the outpost's guns between us and the threat, keeps us inside dock
+    /// range so every retry stays valid, and costs nothing but tylium.
+    ///
+    /// Docking while moving is fine, and that is measured rather than assumed: a manual dock
+    /// landed from 791u while the ship was under way, and the client's own <c>CanDock</c> tests
+    /// only relation and range — there is no speed condition anywhere in it.
+    /// </summary>
+    private async Task OrbitAsync(SpaceObj centre, float radius, DateTime now)
+    {
+        var radial = _world.MyPosition - centre.PredictedPosition(now);
+        float dist = radial.Length();
+
+        // Sitting on top of it. Any direction will do, and outward is the useful one.
+        if (dist < 1f) { await RunInDirection(new Vector3(1f, 0f, 0f), now); return; }
+
+        var outward = radial / dist;
+
+        // The plane to circle in. Crossing with world up gives a level orbit; directly above or
+        // below the body that product collapses, and the heading would be noise rather than a
+        // direction, so fall back to another axis.
+        var tangent = Vector3.Cross(outward, new Vector3(0f, 1f, 0f));
+        if (tangent.LengthSquared() < 0.01f)
+            tangent = Vector3.Cross(outward, new Vector3(1f, 0f, 0f));
+        tangent = Vector3.Normalize(tangent);
+
+        // A pure tangent is a chord, not an arc, so the circle widens every tick and the ship
+        // spirals out of dock range. The radial term is what closes it back up: positive error
+        // means too far out, and subtracting `outward` turns us in.
+        float error = Math.Clamp((dist - radius) / Math.Max(radius, 1f), -1f, 1f);
+
+        await RunInDirection(tangent - outward * error, now);
+    }
+
+    /// <summary>
+    /// Where to circle a station: outside the clearance the collision code would fight us over,
+    /// inside the range a dock request is still valid from.
+    /// </summary>
+    private float OrbitRadius(SpaceObj station)
+    {
+        float inner = ClearanceOf(station) * StandoffMargin;
+        float outer = DockRange(station);
+        return outer > inner ? (inner + outer) * 0.5f : inner;
     }
 
     /// <summary>
@@ -3362,7 +4931,11 @@ public sealed class FarmBot
         var blocker = BlockerAhead(Momentum(heading), lookahead, 0, now, out float gap);
         if (blocker is not null)
         {
-            throttle = ThrottlePastObstacle(blocker, gap, brakeZone);
+            // Same rule as the approach: inside something, the throttle is what gets us out.
+            throttle = blocker.Id == _escapeFrom
+                ? EscapeThrottle(blocker, now)
+                : ThrottlePastObstacle(blocker, gap, brakeZone);
+
             gear = Gear.Regular;
             NoteDodge(blocker, gap, now);
         }
@@ -3389,7 +4962,6 @@ public sealed class FarmBot
     private async Task FleeTick(float hull)
     {
         await StopAllTogglesAsync();
-        lock (_gate) { _target = 0; _lockedTarget = 0; }
 
         var threat = NearestDanger();
         var now = DateTime.UtcNow;
@@ -3402,6 +4974,17 @@ public sealed class FarmBot
         // to identify what took the hull off is not evidence of safety, and the old "hold to
         // recover" branch parked the ship in the open right where it was being shot.
         var refuge = threat is not null ? SafeOutpost(threat) ?? NearestRefuge() : NearestRefuge();
+
+        // Drop whatever we were shooting — but NOT a lock we hold on the refuge itself, which is
+        // what the dock needs. This used to clear both unconditionally on every tick of the
+        // retreat, which is how the bot came to ask a server to dock a station it had never told
+        // that server it had selected. See LockBeforeDockAsync.
+        lock (_gate)
+        {
+            _target = 0;
+            if (_lockedTarget != (refuge?.Id ?? 0)) _lockedTarget = 0;
+        }
+
         if (refuge is not null)
         {
             float gap = _world.DistanceToMe(refuge) ?? float.MaxValue;
@@ -3417,17 +5000,105 @@ public sealed class FarmBot
                 return;
             }
 
-            // Arrived. Hovering at the door is still being in the open, so put the ship inside.
+            // Arrived.
+            if (_dockTryId != refuge.Id)
+            {
+                _dockTryId = refuge.Id;
+                _dockTrySince = now;
+                _refugeHullBest = hull;
+            }
+
+            // Is being here working? That is a measurement, not a clock.
+            //
+            // The first version of this gave up after a flat 10s, which is wrong in the one case
+            // it was written for: a dock cooldown after combat can be tens of seconds, and a timer
+            // that short abandons a perfectly good outpost while the countdown is still ticking.
+            // What actually matters is whether the hull is holding. Under an outpost's guns, with
+            // the ship circling rather than parked, it should be — and while it is, there is no
+            // reason to be anywhere else however long the door takes.
+            if (hull > _refugeHullBest) _refugeHullBest = hull;
+
+            bool bleeding = hull < _refugeHullBest - RefugeBleedFraction;
+
+            if (threat is not null && bleeding && !DockCountdownRunning
+                && (now - _dockTrySince).TotalSeconds > DockGiveUpSeconds)
+            {
+                lock (_gate) _dockRefused.Add(refuge.Id);
+                Log?.Invoke($"{refuge} is not taking us in and the hull has fallen from "
+                          + $"{_refugeHullBest:P0} to {hull:P0} with {threat} still on us — "
+                          + "running instead. It will not be treated as a refuge again this sector.");
+                _dockTryId = 0;
+                refuge = null;
+            }
+        }
+
+        // Re-tested rather than nested: the block above can give up on its refuge, and what
+        // follows is then the correct behaviour for having none at all — which is to run.
+        if (refuge is not null)
+        {
+            float gap = _world.DistanceToMe(refuge) ?? float.MaxValue;
+            string chased = threat is not null
+                ? $", {threat} {_world.DistanceToMe(threat) ?? 0f:F0}u behind"
+                : "";
+
+            // Waiting at the door, one of two ways. With something shooting at us, circle it: a
+            // parked ship is the easiest shot in the game, and this is the state that got one
+            // killed. With nothing chasing, park — it costs no tylium and the hull comes back
+            // just as fast.
+            if (threat is not null)
+            {
+                float ring = OrbitRadius(refuge);
+                await OrbitAsync(refuge, ring, now);
+                _orbiting = true;
+            }
+            else
+            {
+                await StopThrottleIfMoving();
+                _orbiting = false;
+            }
+
+            string holding = _orbiting
+                ? $"circling at {_world.DistanceToMe(refuge) ?? 0f:F0}u"
+                : $"holding at {gap:F0}u";
+
+            if (!AllowDocking)
+            {
+                if (!_dockDisabledSaid)
+                {
+                    _dockDisabledSaid = true;
+                    Log?.Invoke($"At {refuge} ({gap:F0}u) — holding here rather than docking. "
+                              + "Docking is off because every request the bot has sent dropped "
+                              + "the session; the outpost's guns are the point anyway. Set "
+                              + "AllowDocking in bot.json to try it.");
+                }
+                Status = $"HULL {hull:P0} — sheltering at {refuge}, {holding}, not docking{chased}";
+                return;
+            }
+
+            // Select it first — the difference between a dock and a dropped session. Costs one
+            // tick, which we are spending circling anyway.
+            if (await LockBeforeDockAsync(refuge))
+            {
+                Status = $"HULL {hull:P0} — at {refuge}, {holding}, selecting it to dock{chased}";
+                return;
+            }
+
             // Rate-limited like every other dock request: an over-range attempt is logged as
-            // cheating with your player id on it.
-            await StopThrottleIfMoving();
-            if ((now - _dockAsked).TotalSeconds >= 4)
+            // cheating with your player id on it. And never while the server's own countdown is
+            // running — the client's dock button is disabled for exactly that window, so a
+            // request inside it is one the real client could not have produced.
+            if (!DockCountdownRunning && (now - _dockAsked).TotalSeconds >= 4)
             {
                 _dockAsked = now;
                 await _act.Dock(refuge.Id);
-                Log?.Invoke($"Retreat: dock requested at #{refuge.Id:X8} from {gap:F0}u.");
+                Log?.Invoke($"Retreat: dock requested at #{refuge.Id:X8} from {gap:F0}u"
+                          + (_orbiting ? " while circling it." : "."));
             }
-            Status = $"HULL {hull:P0} — docking at {refuge} ({gap:F0}u){chased}";
+            Status = $"HULL {hull:P0} — docking at {refuge}, {holding}"
+                   + (DockCountdownRunning
+                        ? $", countdown {(_dockCountdownUntil - now).TotalSeconds:F0}s"
+                        : "")
+                   + chased;
             return;
         }
 
@@ -3459,17 +5130,48 @@ public sealed class FarmBot
     /// otherwise get properly close, because the server treats an over-range dock as cheating
     /// rather than as a miss.
     /// </summary>
-    private float DockRange(SpaceObj station) =>
-        _learnedDockRange > 0
-            ? _learnedDockRange * 0.9f
-            : Math.Max(DockApproach, station.Radius * RadiusClearance + MinimumStandoff);
+    private float DockRange(SpaceObj station)
+    {
+        // The card, when we have it: OwnerCard.DockRange is the exact figure the client tests
+        // against in CanDock, so nothing else can beat it. 90% of it, for the same reason the
+        // learned range is discounted — the distance is measured a tick before the request lands.
+        if (DockCard(station)?.DockRange is > 0 and var published)
+            return published * 0.9f;
+
+        if (_learnedDockRange > 0) return _learnedDockRange * 0.9f;
+
+        return Math.Max(DockApproach, station.Radius * RadiusClearance + MinimumStandoff);
+    }
+
+    /// <summary>The Owner card for an object, which is where dockability actually lives.</summary>
+    private OwnerCardInfo? DockCard(SpaceObj o) => o.CardGuid == 0 ? null : Cards.Owner(o.CardGuid);
+
+    /// <summary>
+    /// Somewhere we can actually dock, as opposed to something shaped like it.
+    ///
+    /// <see cref="EntityTypes.IsDockable"/> is a guess from the object id — Outpost or Cruiser —
+    /// and it only narrows the search. The Owner card answers it outright, so when we hold one it
+    /// wins: a friendly Cruiser whose card says <c>IsDockable == false</c> is not a refuge, and a
+    /// retreat that treats it as one is a retreat that flies to a body it can never enter.
+    ///
+    /// Without a card we fall back to the type, because refusing to retreat to an outpost whose
+    /// card has not arrived yet is worse than trying one that turns out to be shut. What makes
+    /// that survivable is <see cref="FleeTick"/> no longer parking at zero throttle to find out.
+    /// </summary>
+    private bool CanDockAt(SpaceObj o)
+    {
+        if (!EntityTypes.IsDockable(o.Id) || o.Cloaked) return false;
+        if (_world.RelationTo(o.Id) is not (Relation.Friend or Relation.Self)) return false;
+
+        // Tried, flown to, and it did not open. Measured beats both the card and the type.
+        lock (_gate) if (_dockRefused.Contains(o.Id)) return false;
+
+        return DockCard(o)?.IsDockable ?? true;
+    }
 
     /// <summary>Nearest friendly place to dock, with no opinion about which way the threat is.</summary>
     private SpaceObj? NearestRefuge() =>
-        FleeToOutpost
-            ? _world.Nearest(o => EntityTypes.IsDockable(o.Id) && !o.Cloaked
-                               && _world.RelationTo(o.Id) is Relation.Friend or Relation.Self)
-            : null;
+        FleeToOutpost ? _world.Nearest(CanDockAt) : null;
 
     private SpaceObj? SafeOutpost(SpaceObj threat)
     {
@@ -3481,8 +5183,7 @@ public sealed class FarmBot
         toThreat = Vector3.Normalize(toThreat);
 
         return _world.Snapshot()
-            .Where(o => EntityTypes.IsDockable(o.Id) && o.HasPosition && !o.Cloaked)
-            .Where(o => _world.RelationTo(o.Id) is Relation.Friend or Relation.Self)
+            .Where(o => o.HasPosition && CanDockAt(o))
             .Where(o =>
             {
                 var toStation = o.Position - me;
@@ -3701,6 +5402,16 @@ public sealed class FarmBot
             : "my position    unknown");
         lines.Add($"hull           {Points(_world.MyHull, _world.MyMaxHull, _world.MyHullFraction)}");
         lines.Add($"power          {Points(_world.MyPower, _world.MyMaxPower, _world.MyPowerFraction)}");
+        lines.Add($"condition      {(Condition is { } cond
+            ? $"{cond.Now:F0} / {cond.Max:F0} ({cond.Now / cond.Max:P0})"
+            : _world.MyCondition is { } bare ? $"{bare:F0} (no ship card yet)" : "unknown")}");
+        lines.Add($"hangar         {(_hangarSince is { } inHangar
+            ? $"out of sector for {(DateTime.UtcNow - inHangar).TotalSeconds:F0}s"
+              + (AutoUndock ? $", {_launchAsks} launch ask(s)" : ", auto undock OFF")
+            : _world.Anchored
+                ? $"anchored to #{_world.AnchoredTo:X8} — riding, {_unanchorAsks} launch ask(s)"
+                : "flying")}");
+        lines.Add($"deaths         {Deaths}, {RepairsBought} repair(s) bought");
 
         string speedSource = TopSpeedOverride > 0f ? "set by hand"
                            : _world.ShipStat(ObjectStat.Speed) is > 0 ? "ship stat"
@@ -3712,7 +5423,11 @@ public sealed class FarmBot
         lines.Add($"throttle       {TopSpeed:F0}u/s ({speedSource})");
         lines.Add($"boost          " + (BoostSpeed > 0f
             ? $"{BoostSpeed:F0}u/s ({boostSource})"
-              + (UseBoost ? $", engaged past {BoostMargin:F0}u" : ", toggle is OFF")
+              + (UseBoost
+                    ? $", engaged past {BoostRunway(AsteroidStandoff):F0}u on a rock"
+                      + $" ({Math.Clamp(BoostSpeed * BrakingSeconds, MinBrakeDistance, BrakingDistance):F0}u to brake"
+                      + $" + {BoostSpeed * BoostShedSeconds:F0}u to shed it)"
+                    : ", toggle is OFF")
             : $"unusable — no BoostSpeed ({boostSource}), so the gear is never engaged"));
         // The EFFECTIVE speed, not the stored throttle. In boost gear the throttle number does
         // nothing — printing it read "52u/s in Boost" while the ship was genuinely doing 86.
@@ -3720,6 +5435,14 @@ public sealed class FarmBot
             ? $"{SpeedInGear(_gear):F0}u/s in {_gear}"
               + (_gear == Gear.Boost ? $" ({_throttle:F0}u/s stored for Regular)" : "")
             : "stopped")}");
+        // Where the ship IS, as opposed to where dead reckoning has got to. Every distance the
+        // bot acts on is measured from this, so its age is the error bar on all of them.
+        double fixAge = _world.MyFixAgeSeconds;
+        lines.Add($"position fix   " + (double.IsPositiveInfinity(fixAge) || fixAge > 1e6
+            ? "never stated by the server — everything is dead reckoning"
+            : $"{fixAge:F1}s old"
+              + (SelfPositionSuspect ? ", FLOWN SINCE — distances unproven" : ", trusted")
+              + $", {PositionResyncs} stop(s) to re-confirm"));
         lines.Add("");
 
         var guns = Weapons.For(WeaponRole.Combat);
@@ -3731,6 +5454,9 @@ public sealed class FarmBot
         {
             var ahead = BlockerAhead(_world.MyVelocity, TopSpeed * CollisionLookaheadSeconds,
                                      CurrentTarget, DateTime.UtcNow, out float room);
+            lines.Add($"clearance      asteroid r×{AsteroidColliderFactor:F2} +{AsteroidCollisionMargin:F0}u, "
+                    + $"planetoid r×{PlanetoidClearanceFactor:F2} +{PlanetoidCollisionMargin:F0}u, "
+                    + $"other r +{SafetyMargin:F0}u (hull {MyRadius:F0}u)");
             lines.Add($"collisions     avoiding, radius +{CollisionMargin:F0}u, looking "
                     + $"{TopSpeed * CollisionLookaheadSeconds:F0}u ahead — "
                     + (_world.MyVelocity.LengthSquared() < 1f ? "not moving"
@@ -3758,12 +5484,15 @@ public sealed class FarmBot
 
         if (scanner is not null)
         {
+            // Counted once. Each call is a full sweep of the sector, and this line used to make
+            // two of them to print one number.
+            int confirmed = ConfirmedRocks(nowD);
             string gate = !ScannerAnswering
                 ? $"NOT ANSWERING — {_scansWithoutReply} casts with no reply, mining unfiltered"
                 : ScanOnlyWhenFiltering && !Filtering
                     ? "idle (no resource filter set)"
-                    : ConfirmedRocks(nowD) >= ScanQueueDepth
-                        ? $"idle (queue full — {ConfirmedRocks(nowD)} confirmed, wants {ScanQueueDepth})"
+                    : confirmed >= ScanQueueDepth
+                        ? $"idle (queue full — {confirmed} confirmed, wants {ScanQueueDepth})"
                         : CanAffordScan(scanner) ? "ready" : "waiting for power";
             string kind = scanner.Area switch
             {

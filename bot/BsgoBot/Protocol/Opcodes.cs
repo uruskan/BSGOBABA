@@ -156,9 +156,45 @@ public static class GameOp
     }
 }
 
+/// <summary>
+/// Room protocol (id 10) — the hangar you stand in, not the sector you fly in.
+///
+/// <c>Quit</c> is what the UNDOCK button actually sends (client: <c>UndockButton.Undock</c>).
+/// Leaving the room is what makes the server put the ship back in space; the client then loads
+/// the space level and sends <c>Game.JumpIn</c> itself once its cards are ready
+/// (<c>SpaceLevel.Preload</c>). Injecting JumpIn from a hangar therefore does nothing at all —
+/// it is the second half of a sequence whose first half never happened.
+/// </summary>
+public static class RoomOp
+{
+    public enum Request : ushort
+    {
+        Talk = 0,
+        NpcMarks = 2,
+        EnterDoor = 4,
+        Quit = 5,
+        Enter = 6,
+    }
+}
+
 /// <summary>Player protocol (id 4). Only the replies the bot actually consumes.</summary>
 public static class PlayerOp
 {
+    /// <summary>
+    /// The hangar-side requests the bot sends. Transcribed from the client's PlayerProtocol —
+    /// these are hangar actions, so they are legal only while docked.
+    /// </summary>
+    public enum Request : ushort
+    {
+        /// <summary>containerId, systemServerId, repairValue, useCubits.</summary>
+        RepairSystem = 11,
+        /// <summary>shipId, repairValue (points of durability to buy back), useCubits.</summary>
+        RepairShip = 12,
+        /// <summary>shipId, useCubits. The damage window's "repair all" — hull and every
+        /// system in one message, which is what a death needs.</summary>
+        RepairAll = 26,
+    }
+
     public enum Reply : ushort
     {
         Reset = 1,

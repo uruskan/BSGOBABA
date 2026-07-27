@@ -211,20 +211,98 @@ rock in radius into one cast (capped at `MaxAreaScanTargets`, default 32), exact
 `TopSpeed` = `max(ObjectStat.Speed, fastest throttle we've watched you send)`, falling back to
 `FallbackSpeed` (100). Sent as `SetSpeed(Abs, TopSpeed)`.
 
-Boost engages while `distance > standoff + BoostMargin` (1500u), drops to Regular on arrival.
 Speed is always sent **before** gear, because `SetGear(Regular)` re-applies the stored throttle.
+
+Boost engages while the target is further out than the **runway** — the room needed to arrive
+under control, measured at boost speed:
+
+```
+runway = standoff + clamp(BoostSpeed × BrakingSeconds, 120, 700) + BoostSpeed × BoostShedSeconds
+```
+
+Both terms are measured in the *fast* gear on purpose: the question is "is there room to run fast
+and still stop", so it cannot be answered against the cruise the ship happens to be in while
+asking. Boost is also dropped outright the moment anything is in the way (`blocker is not null`),
+and the braking zone and obstacle lookahead are both sized from `SpeedInGear(gear)`, so they widen
+with it.
+
+> This replaced a flat `BoostMargin` of 1,500u, which asked the wrong question. A rock's standoff
+> is ~170u, so nothing closer than 1,670u ever boosted — and no asteroid hop in a belt is that
+> long. In one 48-minute session every mining approach (441u … 1,382u) ran at cruise, and the only
+> two boosts were retreats across the sector. The real requirement is ~450u on the same ship, so
+> the margin was about three times the thing it was guarding against. **A safety number nobody has
+> measured tends to be sized by imagination, and imagination is expensive.**
+
+### Where the ship thinks it is
+
+Only some messages state our position outright: `SyncMove`, the `Rest` / `Teleport` / `Warp`
+maneuvers, and a `WhoIs`. A normal approach is a stream of `Directional` maneuvers — heading and
+march speed, no position — so **between fixes the ship's position is integrated, not known**. The
+model flies the ordered heading in a straight line at the ordered speed while the real ship arcs
+through its turn and takes time to reach it, so the error grows for as long as the flight lasts.
+
+`WorldState.MyFixAt` records when the server last *stated* where we are, as distinct from where
+dead reckoning has got to. `MyFixAgeSeconds` is therefore the error bar on every distance the bot
+acts on, and the diagnostics panel prints it:
+
+```
+position fix   1.8s old, trusted, 3 stop(s) to re-confirm
+position fix   6.2s old, FLOWN SINCE — distances unproven, 3 stop(s) to re-confirm
+```
+
+Before the mining loop commits to "I have arrived" — cutting the throttle, locking, opening fire —
+it tests that belief. If the ship has flown since the last fix it stops and waits up to
+`SelfPositionWaitSeconds` (6) for a fresh one. **Stopping is not a delay, it is the question:**
+coming to rest is what makes the server broadcast a `Rest` maneuver, and a `Rest` states a
+position. It is also exactly what the caller was about to do anyway.
+
+Two rules keep this from becoming a stutter:
+
+- The test is "have we flown since the server last told us", **not** "is the fix old". A ship
+  parked on a rock for two minutes has a two-minute-old fix and is precisely where it says.
+- A server that never answers cannot park the bot: after the wait it flies on the estimate and
+  says so once.
+
+> This was the fix for a ship sitting motionless with the status line reading
+> `Mining #070000ED — 146u / 600u` while the rock was behind and to the left. The modelled
+> distance crossed inside mining range before the real one did, the throttle came off, and the
+> lasers fired at something the server considered out of reach — silently, because an out-of-range
+> cast is refused without a reply. Nothing recovered until the 20s stall watchdog gave up on a
+> rock that was never the problem.
+
+`ApplyWhoIs` also updates `MyPosition` when the WhoIs is about our own ship. It used to write the
+object's position and leave `MyPosition` on the older reading — a free fix thrown away, and the
+first one to arrive after a jump.
 
 ### Standoff — where it stops
 
 | Target | Distance |
 |---|---|
-| Asteroid | `AsteroidStandoff` (default **179u**), clamped to `reach × 0.95` |
-| Planetoid | `PlanetoidStandoff` (default **1200u**), not clamped |
+| Asteroid | `AsteroidStandoff` (default **120u**) + the rock's radius, clamped to `reach × 0.95` |
+| Planetoid | `PlanetoidStandoff` (default **1200u**), not clamped, floored by its clearance |
 | Moving target | `optimal × CloseInFactor` (0.6), floored by `radius × 3 + 150` |
 | Static target | full `optimal`, floored the same way |
 
 Explicit numbers beat derived ones — the published radius is a bounding figure, not the visual
 hull. Accuracy is flat at or below optimal, so a low standoff costs nothing (see GAME.md §6).
+
+### Clearance — how big a thing is treated as
+
+Parking beside a body and threading between bodies are different questions, so `ClearanceOf` (the
+no-go sphere used by collision avoidance, braking and the standoff floor) is **not** the ×3
+`RadiusClearance` used for standoffs. It is also split by type, because one number cannot serve a
+range spanning two orders of magnitude:
+
+| Body | Clearance | Why |
+|---|---|---|
+| Asteroid | `radius × 0.9 + max(AsteroidCollisionMargin 40, our hull)` | the server builds an asteroid's collider as `radius × 0.9` (`SpaceObjectFactory.createAsteroid`), so the published radius is already generous; the margin only has to cover our own hull |
+| Planetoid | `radius × 1.25 + max(PlanetoidCollisionMargin 500, our hull × 2)` | there are few of them, none are on the way to anything, and we arrive at cruise |
+| Everything else | `radius + max(CollisionMargin 70, our hull × 2)` | ships, stations, debris |
+
+> A flat `+70u` made an 18u pebble an 88u no-go sphere — five times its own size — and in a belt
+> of those the ship is permanently inside somebody's, braking and steering around rocks it had
+> already cleared. The same `+70u` on a 1,500u planetoid is 4% of its radius, which is no margin
+> at all on something you meet at 80u/s. Same constant, opposite errors.
 
 ### Braking
 
@@ -243,7 +321,8 @@ A target we haven't closed on for 30s is skipped for 2 minutes — geometry, anc
 ## Farm loop (250ms tick)
 
 ```
-proxy connected? → stats sweep (2s) → know my ship? → know my position?
+proxy connected? → stats sweep (2s) → in the sector? no → HangarTick, return
+  → know my ship? → know my position?
   → docking?  → DockTick, return
   → hull < RetreatHull?  → disengage
   → AutoLoot  → sweep loot in reach
@@ -261,13 +340,34 @@ parking at the edge of range.
 ### Mining
 
 1. **Scan sweep** — one cast per cooldown, or one batched area cast.
-2. **Target** — prefers rocks with a fresh scan, ranked `ResourceCount / (1 + distance/1000)`
-   (richest per unit of travel). Falls back to unscanned rocks so the ship keeps moving into
-   scanner range instead of parking.
-3. **Hold fire on unknown rocks** when a resource filter is set — breaking open a titanium rock in
+2. **Target** — and the rule depends on which scanner you have, because the two are not the same
+   problem:
+   - **Single-target** (one rock per cast): **nearest first**. At any moment the bot knows the
+     contents of one or two rocks out of hundreds, so ranking that by richness is ranking a
+     sample of two — and an unscanned rock has a count of zero and can never win. Mine the
+     nearest wanted rock; failing that, go identify the nearest unknown one.
+   - **Area** (a whole field per cast): **richest per unit of travel**,
+     `ResourceCount / (1 + (distance/RockTravelPenalty)²)`. The penalty is **squared**: at the
+     default 1000u a rock 2,000u out needs 5× the ore to win and one 5,000u out needs 26×, which
+     nothing has. Worth a detour, not worth crossing the sector. Bounded to the scanner's own
+     reach whenever anything qualifies inside it.
+3. **Resource priority** — `WantedResources` is an ordered list, not a set. The highest-ranked
+   resource with anything confirmed and reachable wins outright. It decides where to go **next**;
+   a rock already being worked is finished rather than abandoned when something better respawns.
+   Selecting all three is not a filter — it is the default written longhand, and is treated as
+   such.
+4. **Hold fire on unknown rocks** when a resource filter is set — breaking open a titanium rock in
    water mode is exactly what the filter is meant to prevent. Holding also lets power rebuild for
-   the scan.
-4. **Fire** — mining lasers if known, otherwise your cannons.
+   the scan. Abandoned, loudly, if the scanner stops answering: an unenforceable filter is a
+   reason to mine unfiltered, not a reason to park.
+5. **Fire** — mining lasers if known, otherwise your cannons.
+6. **Roam** when nothing qualifies. Almost everything `MiningCandidate` rejects is a belief that
+   goes stale, so those are dropped and the ship flies to the nearest rock it knows nothing
+   about, at any distance. Skips recorded by the *mining watchdog* are exempt — those are
+   measured, not believed.
+7. **Stall watchdog** — `MiningStallSeconds` (20) of being in position with lasers on a rock and
+   neither its hull falling nor ore reaching the hold means the rock is gone. Progress is measured
+   on results, never on casts sent: the server refuses a cast at a vanished object silently.
 
 Scanning is skipped entirely when `MINE = Any` (`ScanOnlyWhenFiltering`) — 50 power for an answer
 nothing reads. Scans also require `cost + ScanPowerReserve × maxPower` free.
@@ -276,36 +376,281 @@ Scan results expire after `ScanFreshnessSeconds` (180) — contents respawn and 
 
 ---
 
+## Cost of a tick
+
+Two 250ms timers run at once: the farm loop, and the UI refresh. Both walk the sector. That is
+affordable only as long as walking the sector is O(n) — and it is very easy to make it O(n²)
+without noticing, because nothing about the call site looks expensive.
+
+**`WorldState.Snapshot()` is a deep copy of every object in the sector.** It is the right thing
+to hand to a predicate, and the wrong thing to call *from inside* one.
+
+That is exactly what `InStationDanger` did. It asks "is this one object inside an enemy station's
+envelope", and to answer it called `HostileStations()`, which took a full `Snapshot()`. Its
+callers — `MiningCandidate`, `CombatCandidate`, `Roam` — are predicates handed to
+`_world.Nearest(...)` and `Snapshot().Count(...)`, i.e. run **once per object**. So one "which
+rock should I mine" pass over 200 contacts made 200 complete copies of the world, each taking the
+world lock.
+
+Eight times a second, that is enough to:
+
+- peg the UI thread so the window cannot be dragged or raised;
+- starve the relay's decode thread of the world lock, so incoming frames back up, the ship stops
+  responding to the player, and **the server eventually closes the connection** — which shows up
+  in the log as `the server errored: An established connection was aborted by the software in
+  your host machine`, and looks exactly like the bot's own traffic being rejected.
+
+The fix is a 500ms memo on `HostileStations()`. Stations do not move; staleness costs nothing.
+
+Two rules came out of it:
+
+1. **Nothing called per-object may call `Snapshot()`.** Hoist it, or cache it with a short TTL.
+2. **A panel that is not visible does no work.** `RefreshUi` already gated the map, contacts and
+   loadout on `Visible`; `Diagnostics()` — the most expensive of the lot, several sector walks and
+   fifty lines of formatting — was the one that was missed.
+
+Lock discipline that falls out of the same problem: **never hold a lock across `yield return`.**
+An iterator holds the monitor from the first `MoveNext` until the enumerator is disposed, so
+`CombatLog.Describe()` held the combat log's lock across arbitrary caller code, and would have
+held it forever if anyone abandoned the enumerator. It returns a finished list now.
+
+---
+
 ## Docking
 
 **Dock** stops the farm, picks the nearest friendly/neutral Outpost or Cruiser, flies there with
-the same braking approach, and requests only once genuinely close — rate-limited to one attempt
-per 4s, because an over-range attempt is logged as cheating.
+the same braking approach, **selects it**, and only then asks — rate-limited to one attempt per 4s.
 
-It **learns**: when you dock manually the bot records the distance and uses 90% of it thereafter.
+The selection is the part that matters, and it cost three sessions to learn.
 
-**Undock** sends `JumpIn`. One message, no approach.
+### The dock that hung up the server
+
+Every dock request the bot had ever sent ended the session:
+
+```
+02:18:54.398  Retreat: dock requested at #4A000001 from 248u.
+02:18:54.476  Session ended — the server closed the connection      (+78ms)
+02:34:54.008  Retreat: dock requested at #4A000001 from 246u.
+02:34:54.372  Session ended — the server closed the connection      (+364ms)
+13:37:15.735  Retreat: dock requested at #4A000001 from 249u.
+13:37:15.815  Session ended — the server closed the connection      (+80ms)
+```
+
+Three for three, no counter-example. Two theories died on the evidence before the right one:
+
+- **Not the message.** A real dock captured off the wire (`DumpDockFrame`, below) is
+  `022D000100004A00000000` — byte-for-byte what the bot sends, and what
+  `GameProtocol.RequestDock` writes: `ushort 45`, `uint32 objectID`, `float delay`.
+- **Not the range.** Every dockable object on this server publishes `OwnerCard.DockRange = 1000`
+  (decoded straight out of the cached catalogue, `CardView.Owner` = 29), and a manual dock
+  succeeded from **791u** while the bot was being refused from 248u.
+
+What differed was the sequence. `SpaceLevel.Dock()` can only ever dock `GetPlayerTarget()`, so a
+real dock is always a `LockTarget` followed by a `Dock` — and the captured trail shows exactly
+that, a `LockTarget` for the outpost twenty seconds ahead of the request. `FleeTick`, meanwhile,
+cleared `_target` and `_lockedTarget` as its **first act on every tick**, so the bot asked the
+server to dock a station it had never told that server it had selected. No client can produce
+that, and this server answers it by hanging up rather than refusing.
+
+`LockBeforeDockAsync` now sends the lock, lets it settle 600ms, and docks on a later tick. The
+retreat keeps a lock held on the refuge and only clears locks on other things.
+
+> The lesson generalises past docking: **a message being byte-perfect says nothing about the state
+> the server expects to be in when it arrives.**
+
+### Reading a real one
+
+Press dock in the client and the bot prints the request as it left, plus its context:
+
+```
+YOUR DOCK — raw frame, 11b: 022D000100004A00000000
+YOUR DOCK — that frame holds 1 message(s): Dock(45) 8b
+YOUR DOCK — what the client sent in the seconds before it: ... -20.0s LockTarget, -1.4s SetGear, -0.0s Dock
+```
+
+The trail is a 16-entry ring of the client's own Game requests. The frame list matters separately:
+a client frame can hold several messages back to back, so "what was batched with the dock" and
+"what preceded it" are different questions.
+
+### The countdown
+
+`Reply.DockingDelay` (95) carries a float — the delay the server is imposing. The client disables
+its DOCK button for exactly that long and offers `CancelDocking` (102) instead. The bot knew the
+opcode and did nothing with it; it now waits the countdown out, and **no dock request goes out
+inside the window**, because a second request there is another thing the real client cannot send.
+The dock-run timeout stands down while a countdown ticks, so a long post-combat delay cannot
+abandon a dock that is about to land.
+
+We do not model a server-side *cancel* of a countdown. If one is cancelled we wait out a dead
+timer and retry after it expires — self-healing, at the cost of one countdown.
+
+### Where to dock, and how far out
+
+`CardView.Owner` (29) is now parsed — `bool IsDockable`, `float DockRange`, `byte Level`, six
+bytes, straight out of the client's `OwnerCard.Read`. It replaces two guesses:
+
+| Question | Was | Now |
+|---|---|---|
+| Can this be docked at? | the object's **type** — `Outpost or Cruiser` | the card's `IsDockable`, falling back to the type when no card has arrived |
+| From how far? | `max(DockApproach 250, radius × 3 + 150)` | `DockRange × 0.9` (1000u on every dockable object here), then the range learned from your own docking, then the old guess |
+
+> The bot's own comment claimed this "isn't on the wire". It was, and 292 of these cards were
+> already sitting unparsed in the catalogue cache — the client fetches them itself. A claim about
+> the wire is checkable; this one cost a retreat that flew to a body it could not enter.
+
+### Never stationary under fire
+
+Waiting at a refuge takes one of two forms:
+
+| Situation | What the ship does |
+|---|---|
+| Nothing chasing us | Park. Costs no tylium, and the hull comes back just as fast |
+| Something shooting at us | **Circle it** at `OrbitAsync`, at running speed, with the boost lit |
+
+Circling keeps the station's guns between us and the threat, keeps the ship inside dock range so
+every retry stays valid, and makes it a far worse target than a parked one. Docking while moving
+is fine, and that is measured rather than assumed: a manual dock landed from 791u while the ship
+was under way, and the client's `CanDock` tests only relation and range — no speed condition
+appears anywhere in it.
+
+The orbit is a tangent plus a radial correction:
+
+```
+outward = normalize(me - station)
+tangent = normalize(outward × up)          // level circle; falls back to another axis at the poles
+error   = (distance - radius) / radius
+heading = tangent - outward × error        // the correction; a pure tangent is a chord, and spirals out
+```
+
+The radius sits between the station's clearance sphere (below it the collision avoidance fights
+the orbit) and `DockRange × 0.9` (above it the dock requests stop being valid) — typically
+350–800u. It goes through the same obstacle deflection as any other heading.
+
+**When to stop waiting is a measurement, not a clock.** The refuge is abandoned only if the hull
+has fallen `RefugeBleedFraction` (0.10) below its best reading since arriving, something is still
+shooting, no server countdown is running, and at least `DockGiveUpSeconds` (10) has passed as
+hysteresis. It is then added to a per-sector refused set so it is not chosen again, and the
+retreat falls through to running away.
+
+> The first cut of this was a flat 10-second timeout, which is wrong in exactly the case it was
+> written for: a dock cooldown after combat can run to tens of seconds, and a short timer abandons
+> a good outpost while its countdown is still ticking. Circling removes the urgency that made a
+> timer seem necessary at all — if the hull is holding, there is no reason to be anywhere else,
+> however long the door takes.
+
+> Without any of this, "arrived" was terminal. A friendly **Cruiser** satisfied the old type-based
+> dockability test, so in a sector with no outpost the bot flew to one, cut the throttle, asked to
+> dock something that would not take it, and was killed at zero speed by the droid it was running
+> from. `FleeTick` exists because holding station under fire killed a Raptor; holding station at a
+> door that will not open is the same mistake wearing a hat.
+
+### The rest
+
+`AllowDocking` (default on) is the switch. Off, the retreat still runs to the outpost and shelters
+under its guns — the part that actually saves the ship; docking was only ever the last step.
+
+It also **learns**: when you dock manually the bot records the distance and uses 90% of it if no
+card is available.
+
+**Undock** sends `Room.Quit`; the client sends `JumpIn` itself once its space level has loaded.
+
+---
+
+## Dying, repairing, launching again
+
+A death used to end the run in every practical sense: the ship left the sector, the farm loop kept
+ticking against a ship that wasn't there, and nothing moved until someone pressed Undock. There is
+now a state machine for everything that happens outside the sector, and it runs **above** every
+flying decision — none of them apply to a ship in a hangar.
+
+```
+not in the sector?
+  → death screen pending?   → SelectRespawnLocation(first), wait 2s
+  → condition short / died? → RepairAll(shipId, useCubits: false)
+  → waited UndockDelay?     → JumpIn, and again every RelaunchInterval until we're flying
+```
+
+Three messages, all transcribed from the client:
+
+| Message | Wire | Why it is needed |
+|---|---|---|
+| `Game` reply `RespawnOptions` (99) | two equal-length `uint32` lists — sectors, and the carrier player each belongs to (0 = a station) | **The server will not launch a dead ship.** Until something answers, the player stays dead, so waiting for a hangar to appear waits forever. |
+| `Game` request `SelectRespawnLocation` (70) | `sectorId, carrierPlayerId` | Answers it. The bot takes the first option. |
+| `Player` request `RepairAll` (26) | `shipId, useCubits` | The damage window's "repair all" — hull condition *and* every fitted system in one message. Repairing the hull alone launches a ship with dead slots. |
+
+**Condition is not hull.** The hull bar refills by itself; condition (`Player` reply `ShipInfo`
+(11): `shipId, float`) does not, and dying is what empties it. Full condition is stated in the
+ship's own catalogue card, so `Condition` reads `now / max` only once both have arrived — and the
+repair is asked for anyway after a death, because dying always costs condition and a server that
+sends no `ShipInfo` would otherwise never trigger one.
+
+**Titanium, never cubits.** Cubits are bought with money; nothing the bot decides on its own can
+spend them. If the condition hasn't moved 8s after asking, the log says so once — the causes are
+no titanium, a cubits-only hull, or a server that ignores `RepairAll`.
+
+### Anchored is a third state
+
+Not the hangar, and not flying: riding another player's carrier, which is where the death screen
+puts you if you take its first option. The client's view of it is total — `Reply.Anchor` (Player
+52, `uint32 carrier`) does `SetPlayerShip(carrier)`, i.e. the carrier *becomes* your ship, and the
+whole ability bar and every flight control switch off.
+
+The bot parsed neither `Anchor` (52) nor `Unanchor` (53, `uint32 ship, byte reason`), so it saw a
+ship id and a position, called that flying, and ran the full farm loop from inside somebody's
+Brimir: throttle, heading, a repair cast, and finally a `Dock` request. The server closed the
+connection on the frame after it.
+
+| State | Undock is |
+|---|---|
+| anchored to a carrier | `Game/77 RequestUnanchor` |
+| in a station hangar | `Room/5 Quit` |
+| flying a carrier yourself | `Game/79 RequestLaunchStrikes` (not implemented — the bot doesn't fly one) |
+
+`UndockButton.Undock` tests them in exactly that order, and anchoring is the **first** branch —
+so the hangar message is the wrong one for a state the bot did not know it could be in.
+
+The death screen now prefers an option whose `CarrierPlayerId` is 0, i.e. a place of our own,
+falling back to the first offer only when no station is on the list.
+
+**Docking by hand stops the farm.** A `RemoveMe(Dock)` within 60s of *your own* `Dock` request is
+you parking the ship, and relaunching it would be the bot undoing an instruction. Only the real
+client's traffic reaches that check — injected frames go straight to the server — so the bot's own
+dock runs can't be mistaken for yours.
 
 ---
 
 ## Settings
 
-Toolbar: mode (Combat/Mining) · Fly to target · Boost · Auto loot · Attack players · Fallback reach
-· Retreat at hull · Hold off rock · Mine (resource)
+Toolbar: mode (Combat/Mining) · Fly to target · Boost · Auto loot · Attack players · Auto undock ·
+Repair in hangar · Fallback reach · Retreat at hull · Hold off rock · Mine (resource)
 
 `bot.json` holds the rest. Notable:
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `AsteroidStandoff` | 179 | hold distance from a rock |
+| `AsteroidStandoff` | 120 | gap to a rock's **surface** (its radius is added on top) |
+| `CollisionMargin` | 70 | clearance on top of a **ship's or station's** radius, floored by 2× our own hull |
+| `AsteroidCollisionMargin` | 40 | clearance on top of `radius × 0.9` for a rock, floored by our own hull |
+| `PlanetoidCollisionMargin` | 500 | clearance on top of a planetoid's scaled radius |
+| `PlanetoidClearanceFactor` | 1.25 | how much of a planetoid's published radius counts as solid |
+| `StandoffMargin` | 1.15 | park this far outside the clearance sphere, never on it |
 | `PlanetoidStandoff` | 1200 | hold distance from a planetoid |
+| `SelfPositionTrustSeconds` | 4 | how old a position fix may be before arrival is re-confirmed |
+| `SelfPositionWaitSeconds` | 6 | how long to sit still waiting for that fix before flying on the estimate |
+| `AllowDocking` | true | let the bot send dock requests at all |
+| `DockGiveUpSeconds` | 10 | shortest stay at a refuge before its hull trend may send us away |
+| `RefugeBleedFraction` | 0.10 | hull lost at a refuge before deciding it is not sheltering us |
 | `FallbackSpeed` | 100 | throttle when Speed stat unknown |
-| `BoostMargin` | 1500 | boost only beyond standoff + this |
+| `BoostShedSeconds` | 1.5 | seconds of boost travel left for shedding boost, on top of the braking zone; the two together set the distance past which boosting is worth it |
 | `RetreatHull` | 0.25 | disengage below this **fraction** |
 | `ScanOnlyWhenFiltering` | true | don't scan when mining anything |
 | `ScanPowerReserve` | 0.25 | keep this fraction of max power back |
-| `ScanFreshnessSeconds` | 180 | how long a scan is trusted |
+| `ScanFreshnessSeconds` | 900 | how long a scan is trusted before the rock counts as unknown again |
 | `MaxAreaScanTargets` | 32 | cap on ids in one area cast |
+| `AutoUndock` | true | answer the death screen and launch again by itself |
+| `AutoRepairShip` | true | buy condition back with titanium before launching |
+| `UndockDelaySeconds` | 6 | hangar dwell — client death sequence, respawn, repair |
+| `RelaunchIntervalSeconds` | 15 | gap before asking to launch again |
 
 ---
 
@@ -327,8 +672,29 @@ Toolbar: mode (Combat/Mining) · Fly to target · Boost · Auto loot · Attack p
 | Ability id 0 could not be bound, saved or test-fired | `0` was the sentinel for "this hex is unbound", and ability ids on this server start at 0 — so a real mining laser was unrepresentable | a sentinel has to be a value the data cannot take |
 | Every weapon refused, mining included | `CastAllowed` trusted a slot list in which nothing was fitted — it was the wrong hangar entry | a list that describes nothing gets to veto nothing |
 | Wrong ship's slots | `MyLoadout` matched on ship id, then fell back to "the only hangar entry", neither of which checks the entry has any hardware in it | prefer the record that has content over the one with the matching key |
+| **Server dropped us six seconds after a respawn** | the death screen's first option was another player's carrier; anchoring was never parsed, so the bot flew, cast and finally sent `Dock` from inside it | a state you do not model is a state you will act wrongly in |
+| Undock did nothing, forever | injected `Game.JumpIn`; the UNDOCK button actually sends `Room.Quit`, and the client sends `JumpIn` itself once the space level has loaded | find the message the *button* sends, not the one whose name matches |
+| **Held fire at full power "waiting for the scan"** | the wait was gated on a scanner *existing*; the scan was refused because its reach is unknown, so the give-up counter (unanswered casts) never moved | whatever stops the request must also stop the wait for its reply |
+| Wedged against big asteroids | inside a rock's clearance sphere the gap is 0, so the brake taper pinned the throttle to `MinApproachSpeed` — a crawl, in the one state where the ship is definitely in the wrong place | getting out outranks arriving |
+| **Mined a rock, then fled from it** | the asteroid standoff was `Max(setting, ClearanceOf(rock))`, so the ship parked *exactly* on the clearance sphere — the moment that rock stopped being the target it counted as an obstacle we were inside | never park on a boundary you also test against |
+| "Hold off rock" did nothing | measured from the rock's **centre** and floored by radius + margin, so on any rock bigger than the number you typed the floor won | a setting you cannot feel is a setting that is wrong |
 | Contact buttons silently did nothing | `_ = what(id)` started the task without awaiting it, so "no session" was thrown *inside* the task and the surrounding try/catch never saw it | fire-and-forget discards failures as well as results |
 | Nine casts in three milliseconds | `FireAll` fired every gun in one pass | no human client produces that pattern |
+| **UI unmovable, ship uncontrollable, server hung up** | `InStationDanger` took a full world `Snapshot()` per call, and its callers run it once per object — O(n²) deep copies, 8×/second, holding the world lock the decode thread needs | a predicate must never do work proportional to the whole set |
+| Diagnostics rebuilt 4×/s while off screen | the one panel in `RefreshUi` not gated on `Visible` | if three of four calls have a guard, the fourth is a bug, not a style |
+| Ghost rock re-targeted forever | the mining watchdog skipped it, then `Roam` cleared *all* skips and re-picked it, because roaming deliberately ignores skips | a measurement and a stale belief cannot share a list |
+| Roamed to a rock the bot did not consider its target | `Roam` bypassed `ResolveTarget`, leaving `_target` at 0, so the scan gate could not see it and `DropTarget` had nothing to clear | one code path per "what am I working on" |
+| Watchdog condemned perfectly good rocks | with `RequireKnownReach` on and no published ranges, `FireAll` held fire on every laser, but the stall watchdog was told "in position and working it" | measure the guns' ability to fire, not the intent to |
+| Scanner aimed at a guess | `RequireKnownReach` governed the guns but not the scanner, which still fell back to 3,000u — manufacturing the silent refusals that read as a flat battery | a rule with an exception nobody wrote down is a rule that is not applied |
+| Hit-rate table described the mining lasers | every cast was booked as a pending shot, including lasers at rocks, which never resolve and vastly outnumber gun shots | a sample has to be drawn from the population you are measuring |
+| Toggle laser cast at instead of switched on | the catalogue states range, reload, power and role, but nothing we have transcribed says cast-vs-toggle; `RefreshFromCatalogue` assumed `Cast` silently | flag a guess as a guess (`KindAssumed`), and let observation settle it |
+| Em dashes became `â€"` | `Widgets.cs` was re-saved as UTF-8-read-as-CP1252, with a BOM added | check the bytes, not the rendering |
+| **Every dock request the bot ever sent hung up the server** | it asked to dock a station it had never sent a `LockTarget` for; the client can only dock its *selected* target | a byte-perfect message says nothing about the state the server expects to receive it in |
+| Docked "too far out" was blamed for it | the comment said `OwnerCard.DockRange` "isn't on the wire" — it is, in `CardView.Owner` (29), and reads 1000 on every dockable object here | a claim about the wire is checkable; check it before building a workaround on it |
+| **Parked motionless "mining" a rock that was behind it** | `DistanceToMe` dead-reckoned the *target* but used a raw `MyPosition` that only advances when a maneuver arrives, so the modelled arrival preceded the real one | if you extrapolate one side of a comparison, extrapolate both |
+| Could not cross its own asteroid belt | one flat `CollisionMargin` for bodies spanning two orders of magnitude — five times a pebble's size, 4% of a planetoid's | a constant that is right in the middle of a range is wrong at both ends |
+| **Died at zero speed to the droid it was fleeing** | in a sector with no outpost a friendly Cruiser passed the type-based dockability test; the ship parked at its door and asked forever, because "arrived" had no failure case | any state you can enter under fire needs a way out that isn't success |
+| Dockability and dock range were both guessed | `CardView.Owner` was never parsed, though 292 of them sat in the cache and the code's own comment said the data "isn't on the wire" | check the claim before building the workaround |
 
 ---
 
@@ -429,3 +795,28 @@ dotnet build "bot\BsgoBot\BsgoBot.csproj"
 ```
 
 Never use `--no-incremental` while it's running (see the bug table).
+
+---
+
+## Two servers at once
+
+There are two live servers, both on port 27050, both running the same client build:
+**PlayBSGO** (152.53.148.101, client under `C:\Program Files\BSGO Launcher\client\live`) and
+**BSGO.fun** (94.16.108.128, client under `C:\Program Files (x86)\BSGOFUN\client\live`).
+
+The client hardcodes the port but takes any IP in `+gameServer`, so each bot instance owns its
+own loopback address. Running one server is unchanged — start the exe, pick the server. For
+both at once, the **Second bot** button opens another window on the other `bot*.json` next to
+the exe (several match → a menu; none → one is cloned from the current config on the next free
+loopback address). Under the hood it spawns the exe with `--config <file>`, which resolves
+relative to the exe folder:
+
+- `bot.json` → proxy on `127.0.0.1:27050` → PlayBSGO
+- `bot.bsgofun.json` → proxy on `127.0.0.2:27050` → BSGO.fun
+
+Captured sessions are filed **by host** into whichever profile matches, creating one when none
+does — a login on one server can no longer overwrite the other's profile (which is how BSGO.fun's
+entry was once lost). While an instance is parked on a live server its session catcher ignores
+logins for any other live server, so two watching instances never steal or kill each other's
+launcher client. A capture updates the client version only for installs on the path the launcher
+actually ran.

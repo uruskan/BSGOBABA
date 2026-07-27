@@ -333,23 +333,34 @@ public sealed class CombatLog
         }
     }
 
-    public IEnumerable<string> Describe()
+    /// <summary>
+    /// Returns a finished list rather than a lazy sequence, on purpose.
+    ///
+    /// This used to be an iterator with the whole body inside <c>lock (_gate)</c>. A
+    /// <c>yield return</c> inside a lock does not release it between elements — the monitor is
+    /// held from the first <c>MoveNext</c> until the enumerator is disposed. So the diagnostics
+    /// panel, enumerating this on the UI thread four times a second, held the combat log's lock
+    /// across arbitrary caller code, blocking the network thread trying to record a hit. An
+    /// enumerator abandoned without disposal would have held it forever.
+    /// </summary>
+    public IReadOnlyList<string> Describe()
     {
+        var lines = new List<string>();
         lock (_gate)
         {
-            yield return $"combat log     dealt {TotalDealt:F0}, taken {TotalTaken:F0}"
-                       + (TotalRepaired > 0 ? $", repaired {TotalRepaired:F0}" : "");
-            yield return $"shots resolved {HitsResolved} hit, {MissesResolved} missed"
-                       + (HitsResolved + MissesResolved > 0
-                           ? $" ({(float)HitsResolved / (HitsResolved + MissesResolved):P0})"
-                           : " (nothing fired yet)");
+            lines.Add($"combat log     dealt {TotalDealt:F0}, taken {TotalTaken:F0}"
+                    + (TotalRepaired > 0 ? $", repaired {TotalRepaired:F0}" : ""));
+            lines.Add($"shots resolved {HitsResolved} hit, {MissesResolved} missed"
+                    + (HitsResolved + MissesResolved > 0
+                        ? $" ({(float)HitsResolved / (HitsResolved + MissesResolved):P0})"
+                        : " (nothing fired yet)"));
 
             var live = _buckets.Where(b => b.Shots > 0).ToList();
             if (live.Count > 0)
             {
-                yield return "hit rate by range";
+                lines.Add("hit rate by range");
                 foreach (var b in live)
-                    yield return $"  {b.Low,5:F0}-{b.High,-5:F0} {b.HitRate,6:P0}  ({b.Hits}/{b.Shots})";
+                    lines.Add($"  {b.Low,5:F0}-{b.High,-5:F0} {b.HitRate,6:P0}  ({b.Hits}/{b.Shots})");
             }
 
             int incoming = _incomingByThrottle.Sum();
@@ -357,18 +368,26 @@ public sealed class CombatLog
             {
                 // Presented raw rather than as a fitted curve: the sample is uncontrolled, and
                 // a number that looks derived invites more trust than it has earned.
-                yield return "incoming hits by our throttle";
+                lines.Add("incoming hits by our throttle");
                 for (int i = 0; i <= 10; i++)
                 {
                     if (_incomingByThrottle[i] == 0) continue;
-                    yield return $"  {i * 10,3}% {_incomingByThrottle[i],4} hit(s), "
-                               + $"{_incomingDamageByThrottle[i]:F0} damage";
+                    lines.Add($"  {i * 10,3}% {_incomingByThrottle[i],4} hit(s), "
+                            + $"{_incomingDamageByThrottle[i]:F0} damage");
                 }
             }
 
-            if (MedianRetargetSeconds() is { } med)
-                yield return $"enemy retarget median {med:F1}s over {_retargetIntervals.Count} switch(es)";
+            // Inlined rather than calling MedianRetargetSeconds(), which takes the same lock —
+            // harmless while Monitor is reentrant, but it stops being harmless the moment
+            // somebody swaps _gate for a non-reentrant primitive.
+            if (_retargetIntervals.Count >= 8)
+            {
+                var sorted = _retargetIntervals.OrderBy(x => x).ToList();
+                lines.Add($"enemy retarget median {sorted[sorted.Count / 2]:F1}s "
+                        + $"over {_retargetIntervals.Count} switch(es)");
+            }
         }
+        return lines;
     }
 
     /// <summary>One line per class we have actually fought.</summary>

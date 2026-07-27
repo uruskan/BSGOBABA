@@ -148,6 +148,29 @@ public sealed class WorldState
     public Vector3 MyPosition { get; private set; }
     public Vector3 MyVelocity { get; private set; }
     public bool MyPositionKnown { get; private set; }
+
+    /// <summary>
+    /// When the server last stated where MY ship actually is, as opposed to where dead reckoning
+    /// thinks it has got to.
+    ///
+    /// The distinction matters because only some messages carry an absolute position — SyncMove,
+    /// and the Rest/Teleport/Warp maneuvers. A normal approach is a stream of Directional
+    /// maneuvers, which state a heading and a march speed and nothing else, so between fixes the
+    /// ship's position is integrated rather than known. The integration is good for a second or
+    /// two and drifts after that: it flies the ordered heading in a straight line at the ordered
+    /// speed, while the real ship arcs through its turn and spends time accelerating.
+    ///
+    /// Anything deciding "am I in range" off a position this old is guessing, and the guess is
+    /// what parks the ship out of reach of a rock it believes it is mining.
+    /// </summary>
+    public DateTime MyFixAt { get; private set; } = DateTime.MinValue;
+
+    /// <summary>Seconds since the server last confirmed our position outright. Huge when we have
+    /// no position at all, so callers can treat "unknown" and "long stale" the same way.</summary>
+    public double MyFixAgeSeconds =>
+        MyPositionKnown && MyFixAt != DateTime.MinValue
+            ? (DateTime.UtcNow - MyFixAt).TotalSeconds
+            : double.MaxValue;
     public Faction MyFaction { get; private set; }
     public FactionGroup MyGroup { get; private set; }
 
@@ -189,6 +212,32 @@ public sealed class WorldState
 
     /// <summary>Raised when we leave the sector entirely (death, jump, dock, disconnect).</summary>
     public event Action<RemovingCause>? SectorLeft;
+
+    /// <summary>
+    /// The death screen, as the server states it: every place we may respawn, as
+    /// <c>(sectorId, carrierPlayerId)</c>. A carrier id of 0 means a station rather than a
+    /// player's ship. Answer it with <c>SelectRespawnLocation</c> — until something does, the
+    /// player stays dead, which is why the bot cannot simply wait for a hangar to appear.
+    /// </summary>
+    public event Action<IReadOnlyList<(uint SectorId, uint CarrierPlayerId)>>? RespawnOffered;
+
+    /// <summary>Raised when the server restates a hangar ship's condition: (shipId, durability).</summary>
+    public event Action<ushort, float>? ShipConditionChanged;
+
+    /// <summary>
+    /// The carrier we are riding, or 0 when we are flying our own ship.
+    ///
+    /// Anchoring is a third state, and the bot used to have no idea it existed: not the hangar,
+    /// and not flying either. The client's own view of it is total — <c>Reply.Anchor</c> does
+    /// <c>SetPlayerShip(carrier)</c>, i.e. the carrier BECOMES your ship — and it disables the
+    /// ability bar and every flight control while it lasts.
+    /// </summary>
+    public uint AnchoredTo { get; private set; }
+
+    public bool Anchored => AnchoredTo != 0;
+
+    /// <summary>Raised when we anchor to a carrier (its object id) or come off one (0).</summary>
+    public event Action<uint>? AnchorChanged;
 
     /// <summary>Raised when the server answers a scan for an asteroid. The reply is what
     /// identifies which of your abilities the scanner is — nothing else announces it.</summary>
@@ -324,6 +373,28 @@ public sealed class WorldState
         }
     }
 
+    /// <summary>Catalogue guid of the ship I am flying, from Reply.AddShip. This is the key to
+    /// its card, and the card is where full durability is stated.</summary>
+    public uint MyShipGuid
+    {
+        get
+        {
+            lock (_gate)
+                return MyShipId != 0 && _hangar.TryGetValue(MyShipId, out var mine) ? mine.ShipGuid : 0u;
+        }
+    }
+
+    /// <summary>Hull condition of the ship I am flying, in points, or null if the server has
+    /// never sent a ShipInfo for it.</summary>
+    public float? MyCondition
+    {
+        get
+        {
+            lock (_gate)
+                return MyShipId != 0 && _hangar.TryGetValue(MyShipId, out var mine) ? mine.Durability : null;
+        }
+    }
+
     /// <summary>Every hangar entry and how much of it is filled — for diagnosing which ship the
     /// slot list actually landed under.</summary>
     public IReadOnlyList<(ushort ShipId, int Slots, int Filled)> HangarSummary()
@@ -447,6 +518,7 @@ public sealed class WorldState
                     MyPosition = o.Position;
                     MyVelocity = o.Velocity;
                     MyPositionKnown = true;
+                    MyFixAt = o.PositionStamp;
                 }
             }
         }
@@ -638,6 +710,21 @@ public sealed class WorldState
                 SectorLeft?.Invoke(cause);
                 break;
             }
+
+            // Two id lists of equal length, read as pairs — client: Reply.RespawnOptions builds
+            // one RespawnLocationInfo per index. A mismatched pair of lists is the client's own
+            // "invalid respawn location list" case, and is dropped here for the same reason.
+            case GameOp.Reply.RespawnOptions:
+            {
+                var sectors = r.ReadUInt32List();
+                var carriers = r.ReadUInt32List();
+                if (sectors.Count == 0 || sectors.Count != carriers.Count) break;
+
+                var options = new List<(uint, uint)>(sectors.Count);
+                for (int i = 0; i < sectors.Count; i++) options.Add((sectors[i], carriers[i]));
+                RespawnOffered?.Invoke(options);
+                break;
+            }
         }
     }
 
@@ -697,12 +784,52 @@ public sealed class WorldState
                 break;
             }
 
+            // Client: Reply.ShipInfo -> HangarShip._SetDurability. One ship, one number, and the
+            // only statement of hull condition anywhere on the wire.
+            case PlayerOp.Reply.ShipInfo:
+            {
+                ushort id = r.ReadUInt16();
+                float durability = r.ReadSingle();
+                bool changed;
+                lock (_gate)
+                {
+                    var ship = Hangar(id);
+                    changed = ship.Durability is not { } was || Math.Abs(was - durability) > 0.01f;
+                    ship.Durability = durability;
+                }
+                if (changed) ShipConditionChanged?.Invoke(id, durability);
+                break;
+            }
+
             case PlayerOp.Reply.ShipName:
             {
                 ushort id = r.ReadUInt16();
                 string name = r.ReadString();
                 lock (_gate) Hangar(id).Name = name;
                 LoadoutChanged?.Invoke();
+                break;
+            }
+
+            // Client: Reply.Anchor -> Game.Me.Anchored = true, AnchorTarget = carrier, and
+            // SetPlayerShip(carrier). We are a passenger from here until told otherwise.
+            case PlayerOp.Reply.Anchor:
+            {
+                uint carrier = r.ReadUInt32();
+                bool changed;
+                lock (_gate) { changed = AnchoredTo != carrier; AnchoredTo = carrier; }
+                if (changed) AnchorChanged?.Invoke(carrier);
+                break;
+            }
+
+            // Client: Reply.Unanchor -> our own ship id back, plus an UnanchorReason byte. Note
+            // the reason is read but not kept: launched, timed out or killed, the fact that
+            // matters here is identical — the ship is ours to fly again.
+            case PlayerOp.Reply.Unanchor:
+            {
+                r.ReadUInt32();                       // our ship, handed back
+                bool changed;
+                lock (_gate) { changed = AnchoredTo != 0; AnchoredTo = 0; }
+                if (changed) AnchorChanged?.Invoke(0);
                 break;
             }
         }
@@ -789,6 +916,18 @@ public sealed class WorldState
                 o.Velocity = Vector3.Zero;
                 o.HasPosition = true;
                 o.PositionStamp = DateTime.UtcNow;
+
+                // A WhoIs about our own ship states where it is, exactly like a Rest maneuver
+                // does, and it was being written to the object while MyPosition kept the older
+                // reading. That is a free fix thrown away — and the one that arrives first after
+                // a jump, when nothing else has said where we came out.
+                if (o.IsMe || info.Id == MyObjectId)
+                {
+                    MyPosition = p;
+                    MyVelocity = Vector3.Zero;
+                    MyPositionKnown = true;
+                    MyFixAt = o.PositionStamp;
+                }
             }
         }
 
@@ -883,6 +1022,10 @@ public sealed class WorldState
                 MyPosition = pos;
                 MyVelocity = velocity;
                 MyPositionKnown = true;
+                // This is a fix, not an estimate: the position came off the wire rather than out
+                // of the integrator. Only Locate stamps this — SetVelocity carries the position
+                // forward itself, which is exactly the dead reckoning MyFixAt exists to distrust.
+                MyFixAt = o.PositionStamp;
             }
         }
     }
@@ -958,18 +1101,27 @@ public sealed class WorldState
         lock (_gate)
         {
             _objects.Remove(id);
-            if (id == MyObjectId) MyPositionKnown = false;
+            if (id == MyObjectId) { MyPositionKnown = false; MyFixAt = DateTime.MinValue; }
         }
     }
 
     public void Clear()
     {
+        bool wasAnchored;
         lock (_gate)
         {
             _objects.Clear();
             MyPositionKnown = false;
+            MyFixAt = DateTime.MinValue;
             MyObjectId = 0;
+
+            // Leaving the sector ends any anchoring with it — the carrier is not in the sector we
+            // are going to. Kept in step here because the server's own Unanchor may arrive before
+            // the removal, after it, or (on a death) not at all.
+            wasAnchored = AnchoredTo != 0;
+            AnchoredTo = 0;
         }
+        if (wasAnchored) AnchorChanged?.Invoke(0);
     }
 
     /// <summary>Player id is known but their ship's WhoIs may already have gone past — re-check.</summary>

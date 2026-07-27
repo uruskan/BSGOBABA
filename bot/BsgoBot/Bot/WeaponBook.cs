@@ -145,6 +145,14 @@ public sealed class Weapon
     public float? Cooldown => StatCooldown ?? CardCooldown ?? UserCooldown;
     public float? PowerCost => StatPowerCost ?? CardPowerCost ?? UserPowerCost;
 
+    /// <summary>
+    /// True while <see cref="Kind"/> is a guess rather than something observed.
+    ///
+    /// Set only by the catalogue path, which has no way to tell a cast from a toggle. Cleared
+    /// the first time the ability is actually seen being fired, because that settles it.
+    /// </summary>
+    public bool KindAssumed { get; set; }
+
     /// <summary>Where the reach in force came from, for the panel and the log.</summary>
     public string RangeSource =>
         StatMaxRange is not null ? "server stats"
@@ -302,6 +310,11 @@ public sealed class WeaponBook
                 // A toggle observation is stronger evidence than a cast one: only the Auto
                 // launch mode ever produces ToggleAbilityOn.
                 if (kind == WeaponKind.Toggle) w.Kind = WeaponKind.Toggle;
+
+                // Watching it fire settles cast-versus-toggle, which the catalogue could not.
+                // An assumed Cast that turns out to be a Toggle is corrected on the line above;
+                // either way the guess is over.
+                if (w.KindAssumed) { w.Kind = kind; w.KindAssumed = false; }
                 // A self-cast is proof, not a guess: nothing else in the game targets your own
                 // ship. It outranks the Utility label a stat sweep hands out by default.
                 if (w.RoleFromUser) { /* you already said what this is */ }
@@ -327,6 +340,14 @@ public sealed class WeaponBook
         Weapon w;
         lock (_gate)
         {
+            // You have already pointed at the scanner. A second one, learned from a reply that
+            // happened to land while something else was cast, is not a discovery — it is a rival
+            // for the same job with none of the numbers you typed in, and whichever of the two
+            // came out of the dictionary first then decided whether scanning worked at all.
+            if (_weapons.Values.Any(x => x.Role == WeaponRole.Scanner && x.RoleFromUser
+                                      && x.AbilityId != abilityId))
+                return null;
+
             if (!_weapons.TryGetValue(abilityId, out var existing))
             {
                 w = new Weapon { AbilityId = abilityId, Kind = WeaponKind.Cast, Role = WeaponRole.Scanner, Source = "server scan reply" };
@@ -510,10 +531,21 @@ public sealed class WeaponBook
             {
                 if (!_weapons.TryGetValue(slot.SlotId, out var w))
                 {
+                    // Cast is an ASSUMPTION, and the one thing here that is not read off a card.
+                    // Nothing in ShipAbilityCard that we have transcribed says cast-versus-toggle
+                    // — Affect only distinguishes single from area — so a toggle-fired mining
+                    // laser learned this way is cast at instead of switched on, which means it
+                    // never actually runs.
+                    //
+                    // It self-corrects the moment the ability is seen being toggled in the real
+                    // client (NoteShot upgrades Cast to Toggle and never the other way), and it
+                    // is flagged so the loadout panel can say so rather than presenting a guess
+                    // as though it came from the server.
                     w = new Weapon
                     {
                         AbilityId = slot.SlotId,
                         Kind = WeaponKind.Cast,
+                        KindAssumed = true,
                         Source = "the catalogue",
                     };
                     _weapons[slot.SlotId] = w;

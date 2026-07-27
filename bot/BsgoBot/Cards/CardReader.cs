@@ -23,7 +23,16 @@ public static class CardReader
     /// <summary>Views this class knows how to decode. Anything else is still cached raw.</summary>
     public static bool CanParse(CardView view) => view is
         CardView.Ship or CardView.World or CardView.ShipAbility or
-        CardView.ShipSystem or CardView.ShipList;
+        CardView.ShipSystem or CardView.ShipList or CardView.Owner;
+
+    /// <summary>Client <c>OwnerCard.Read</c>. Three fields, six bytes.</summary>
+    public static OwnerCardInfo ReadOwner(uint guid, BgoReader r)
+    {
+        bool dockable = r.ReadBoolean();
+        float dockRange = r.ReadSingle();
+        byte level = r.ReadByte();
+        return new OwnerCardInfo(guid, dockable, dockRange, level);
+    }
 
     // ---------------------------------------------------------------- shared
 

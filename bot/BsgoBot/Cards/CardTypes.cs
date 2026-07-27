@@ -68,6 +68,23 @@ public sealed record ImmutableSlotInfo(
     uint ConsumableKey);
 
 /// <summary><c>CardView.World</c> — the physical object: model, size, hardpoints.</summary>
+/// <summary>
+/// <c>CardView.Owner</c> (29) — client <c>OwnerCard.Read</c>: <c>bool IsDockable</c>,
+/// <c>float DockRange</c>, <c>byte Level</c>. Six bytes, and the only authority on whether a
+/// thing can be docked at and from how far.
+///
+/// The bot used to state outright that this "isn't on the wire" and guess instead: dockability
+/// from the object's type (Outpost or Cruiser), and range from a flat 250u. Both guesses cost
+/// something real — the type guess sent a retreat to a body that could not be docked, and the
+/// range guess was blamed for three dropped sessions it had nothing to do with. The card was
+/// arriving the whole time, sitting unparsed in the cache.
+/// </summary>
+public sealed record OwnerCardInfo(
+    uint CardGuid,
+    bool IsDockable,
+    float DockRange,
+    byte Level);
+
 public sealed record WorldCardInfo(
     uint CardGuid,
     string PrefabName,

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Drawing.Drawing2D;
+using System.Text.Json;
 using BsgoBot.Bot;
 using BsgoBot.Protocol;
 using BsgoBot.Proxy;
@@ -30,6 +31,7 @@ public sealed class MainForm : Form
     private readonly FlatButton _btnUndock = new();
     private readonly FlatButton _btnProfiles = new();
     private readonly FlatButton _btnCatch = new();
+    private readonly FlatButton _btnSecond = new();
     private readonly SessionCatcher _catcher = new();
     private readonly DarkCombo _serverBox = new();
     private readonly DarkCombo _clientBox = new();
@@ -45,6 +47,8 @@ public sealed class MainForm : Form
     private readonly ToggleChip _chipOptimal = new("Hold for optimal");
     private readonly ToggleChip _chipAvoidStations = new("Avoid stations");
     private readonly ToggleChip _chipRepair = new("Self repair");
+    private readonly ToggleChip _chipAutoUndock = new("Auto undock");
+    private readonly ToggleChip _chipHangarRepair = new("Repair in hangar");
     private readonly ToggleChip _chipDefend = new("Fight back");
     private readonly ToggleChip _chipAvoidRocks = new("Dodge obstacles");
     private readonly ToggleChip _chipCatalogue = new("Fetch cards");
@@ -84,7 +88,9 @@ public sealed class MainForm : Form
 
     public MainForm()
     {
-        Text = "BSGO Farm Bot";
+        // Two instances farming two servers look identical without this; the config file name
+        // and the loopback address are the only things that tell the windows apart.
+        Text = $"BSGO Farm Bot — {Path.GetFileName(Config.FilePath)} @ {_cfg.ListenHost}";
         ClientSize = new Size(1400, 900);
         MinimumSize = new Size(1080, 740);
         BackColor = Theme.Bg;
@@ -125,12 +131,22 @@ public sealed class MainForm : Form
         _catcher.Log += AppendLog;
         _catcher.Captured += AdoptCapturedSession;
 
+        // When this instance is already parked on a live server, sessions for any other live
+        // server are someone else's: either a second bot instance is watching for them, or the
+        // user picked the wrong window. Local profiles accept anything — that is the bootstrap
+        // path, before a live server has ever been captured here.
+        _catcher.AcceptHost = host =>
+            _cfg.CurrentServer is not { } cur
+            || cur.Host.StartsWith("127.")
+            || cur.Host == "localhost"
+            || cur.Host == host;
+
         ApplySettingsToBot();
         AdoptServerIdentity();
         BuildLayout();
 
         var ui = new System.Windows.Forms.Timer { Interval = 250 };
-        ui.Tick += (_, _) => RefreshUi();
+        ui.Tick += (_, _) => RefreshUiTimed();
         ui.Start();
 
         Load += (_, _) =>
@@ -235,7 +251,7 @@ public sealed class MainForm : Form
         _bot.FallbackFireIntervalMs = b.FallbackFireIntervalMs;
         _bot.AutoApproach = b.AutoApproach;
         _bot.UseBoost = b.UseBoost;
-        _bot.BoostMargin = b.BoostMargin;
+        _bot.BoostShedSeconds = b.BoostShedSeconds;
         _bot.FallbackSpeed = b.FallbackSpeed;
         _bot.TopSpeedOverride = b.TopSpeedOverride;
         _bot.BoostSpeedOverride = b.BoostSpeedOverride;
@@ -254,9 +270,21 @@ public sealed class MainForm : Form
         _bot.FireGunsWhileMining = b.FireGunsWhileMining;
         _bot.ScanQueueDepth = b.ScanQueueDepth;
         _bot.ScanFreshnessSeconds = b.ScanFreshnessSeconds;
+        _bot.AllowDocking = b.AllowDocking;
+        _bot.DockGiveUpSeconds = b.DockGiveUpSeconds;
+        _bot.RefugeBleedFraction = b.RefugeBleedFraction;
+        _bot.AsteroidCollisionMargin = b.AsteroidCollisionMargin;
+        _bot.PlanetoidCollisionMargin = b.PlanetoidCollisionMargin;
+        _bot.PlanetoidClearanceFactor = b.PlanetoidClearanceFactor;
+        _bot.SelfPositionTrustSeconds = b.SelfPositionTrustSeconds;
+        _bot.SelfPositionWaitSeconds = b.SelfPositionWaitSeconds;
         _bot.FleeToOutpost = b.FleeToOutpost;
         _bot.UseRepairAbility = b.UseRepairAbility;
         _bot.RepairAtHull = b.RepairAtHull;
+        _bot.AutoUndock = b.AutoUndock;
+        _bot.AutoRepair = b.AutoRepairShip;
+        _bot.UndockDelaySeconds = b.UndockDelaySeconds;
+        _bot.RelaunchIntervalSeconds = b.RelaunchIntervalSeconds;
         _bot.AvoidHostileStations = b.AvoidHostileStations;
         _bot.HostileStationKeepOut = b.HostileStationKeepOut;
         _bot.HoldFireUntilOptimal = b.HoldFireUntilOptimal;
@@ -430,13 +458,17 @@ public sealed class MainForm : Form
         _btnFarm.Enabled = false;
         _btnFarm.Click += (_, _) => ToggleFarm();
 
+        _btnSecond.Text = "Second bot";
+        _btnSecond.Click += (_, _) => LaunchSecondInstance();
+
         var grid = Rows(2,
-            [15, 32, 15, 32, 32, 32, 32, 32, 38],
+            [15, 32, 15, 32, 32, 32, 32, 32, 32, 38],
             (RailCaption("SERVER"), 2), (_serverBox, 2),
             (RailCaption("CLIENT"), 2), (_clientBox, 2),
             (_btnProfiles, 1), (_btnLaunch, 1),
             (_btnCatch, 2),
             (_btnProxy, 2),
+            (_btnSecond, 2),
             (_btnDock, 1), (_btnUndock, 1),
             (_btnFarm, 2));
 
@@ -505,6 +537,17 @@ public sealed class MainForm : Form
         _chipRepair.CheckedChanged += (_, _) =>
             _bot.UseRepairAbility = _cfg.Bot.UseRepairAbility = _chipRepair.Checked;
 
+        // What happens after a death: launch again, and pay to patch the hull before doing it.
+        _chipAutoUndock.Checked = _cfg.Bot.AutoUndock;
+        _chipAutoUndock.CheckedChanged += (_, _) =>
+            _bot.AutoUndock = _cfg.Bot.AutoUndock = _chipAutoUndock.Checked;
+
+        // Warn-tinted: it is the one switch that spends a resource on its own.
+        _chipHangarRepair.Tint = Theme.Warn;
+        _chipHangarRepair.Checked = _cfg.Bot.AutoRepairShip;
+        _chipHangarRepair.CheckedChanged += (_, _) =>
+            _bot.AutoRepair = _cfg.Bot.AutoRepairShip = _chipHangarRepair.Checked;
+
         _chipAvoidRocks.Tint = Theme.Bad;
         _chipAvoidRocks.Checked = _cfg.Bot.AvoidCollisions;
         _chipAvoidRocks.CheckedChanged += (_, _) =>
@@ -524,7 +567,7 @@ public sealed class MainForm : Form
                  {
                      _chipCombat, _chipMining, brk as Control, _chipApproach, _chipBoost, _chipLoot,
                      _chipGunsOnRocks, _chipOptimal, _chipRepair, _chipAvoidRocks, _chipAvoidStations,
-                     _chipDefend, _chipPlayers, _chipCatalogue,
+                     _chipDefend, _chipPlayers, _chipAutoUndock, _chipHangarRepair, _chipCatalogue,
                  })
         {
             if (chip is ToggleChip c) c.Margin = new Padding(0, 0, 5, 5);
@@ -586,7 +629,8 @@ public sealed class MainForm : Form
         _numRetreat.ValueChanged += (_, _) =>
             _bot.RetreatHull = _cfg.Bot.RetreatHull = _numRetreat.Value / 100f;
 
-        _numRock = new NumberField(50, 5000, 10, (int)_cfg.Bot.AsteroidStandoff, "u");
+        // From the rock's surface now, so the useful range starts much lower than it used to.
+        _numRock = new NumberField(0, 5000, 10, (int)_cfg.Bot.AsteroidStandoff, "u");
         _numRock.ValueChanged += (_, _) =>
             _bot.AsteroidStandoff = _cfg.Bot.AsteroidStandoff = _numRock.Value;
 
@@ -621,8 +665,12 @@ public sealed class MainForm : Form
             (RailCaption("MINE  (click in priority order)"), 2),
             (BuildResourceChips(), 2),
             (RailCaption("RETREAT AT HULL"), 1), (_numRetreat, 1),
-            (RailCaption("STAY WITHIN"), 1), (_numTravel, 1),
-            (RailCaption("HOLD OFF ROCK"), 1), (_numRock, 1),
+            // Named for what they measure. "Stay within" read as a leash and is nothing of the
+            // kind — it is the distance at which a rock is worth half its ore, i.e. how far the
+            // ship will travel for a better one. "Hold off rock" read as a gap and was measured
+            // from the rock's centre, which is why typing 50 into it did nothing.
+            (RailCaption("TRAVEL FOR ORE"), 1), (_numTravel, 1),
+            (RailCaption("GAP TO ROCK"), 1), (_numRock, 1),
             (RailCaption("KEEP OFF GUNS"), 1), (_numKeepOut, 1),
             (RailCaption("CRUISE SPEED"), 1), (_numSpeed, 1),
             (RailCaption("BOOST SPEED"), 1), (_numBoost, 1),
@@ -972,6 +1020,85 @@ public sealed class MainForm : Form
         AppendLog($"Launched '{client.Name}' -> proxy {_cfg.ListenHost}:{_cfg.ListenPort} -> '{server.Name}'");
     }
 
+    // ---------------------------------------------------------------- second instance
+
+    /// <summary>
+    /// Opens another bot window on its own config file, so both live servers farm at once.
+    ///
+    /// One process per server rather than one process juggling two sessions: every panel, the
+    /// world state and the farm loop assume a single ship, and two windows keep that assumption
+    /// true. Each window owns its own loopback address — the client hardcodes port 27050 but
+    /// takes any IP — and its own config file, found here as the other <c>bot*.json</c> next to
+    /// the exe. No second config yet means this is the first time: one is cloned from the
+    /// current config on the next free loopback address, ready except for picking its server.
+    /// </summary>
+    private void LaunchSecondInstance()
+    {
+        var mine = Path.GetFullPath(Config.FilePath);
+        var others = Directory.GetFiles(AppContext.BaseDirectory, "bot*.json")
+            .Where(f => !string.Equals(Path.GetFullPath(f), mine, StringComparison.OrdinalIgnoreCase))
+            .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (others.Count == 0)
+        {
+            try { others.Add(CreateSiblingConfig()); }
+            catch (Exception ex) { AppendLog("Could not create a second config: " + ex.Message); return; }
+        }
+
+        if (others.Count == 1)
+        {
+            SpawnInstance(others[0]);
+            return;
+        }
+
+        var menu = new ContextMenuStrip();
+        foreach (var f in others)
+        {
+            var file = f;
+            menu.Items.Add(Path.GetFileName(file), null, (_, _) => SpawnInstance(file));
+        }
+        menu.Show(_btnSecond, new Point(0, _btnSecond.Height));
+    }
+
+    private void SpawnInstance(string configPath)
+    {
+        var name = Path.GetFileName(configPath);
+        Process.Start(new ProcessStartInfo(Application.ExecutablePath, $"--config \"{name}\"")
+        {
+            WorkingDirectory = AppContext.BaseDirectory,
+        });
+        AppendLog($"Started a second bot on {name}. If its proxy fails to start, "
+                + "that config is already running (or shares this window's listen address).");
+    }
+
+    /// <summary>A copy of this config on the next loopback address. Servers, clients and tuning
+    /// come along; only the listen address differs, so the profiles never have to be set up
+    /// twice.</summary>
+    private string CreateSiblingConfig()
+    {
+        string path;
+        int n = 2;
+        while (File.Exists(path = Path.Combine(AppContext.BaseDirectory, $"bot{n}.json"))) n++;
+
+        var copy = JsonSerializer.Deserialize<Config>(JsonSerializer.Serialize(_cfg))!;
+        copy.ListenHost = NextLoopback(_cfg.ListenHost);
+        File.WriteAllText(path,
+            JsonSerializer.Serialize(copy, new JsonSerializerOptions { WriteIndented = true }));
+
+        AppendLog($"Created {Path.GetFileName(path)} listening on {copy.ListenHost} — "
+                + "pick the other server in the new window.");
+        return path;
+    }
+
+    private static string NextLoopback(string host)
+    {
+        var parts = host.Split('.');
+        return parts.Length == 4 && parts[0] == "127" && int.TryParse(parts[3], out var n)
+            ? $"{parts[0]}.{parts[1]}.{parts[2]}.{Math.Min(n + 1, 254)}"
+            : "127.0.0.2";
+    }
+
     /// <summary>Repopulates both dropdowns from config without firing selection side effects.</summary>
     private void RefreshProfileBoxes()
     {
@@ -1055,22 +1182,23 @@ public sealed class MainForm : Form
     }
 
     /// <summary>
-    /// Files a captured session as the <c>Live (captured)</c> server profile and selects it.
+    /// Files a captured session into the profile for that server and selects it.
     ///
-    /// Overwrites that one profile rather than adding another: a session is only good once, so a
-    /// list of expired ones is a list of things that no longer work. Your own profiles are left
-    /// alone.
+    /// Profiles are matched by host, not by name: there is more than one live server now, and a
+    /// single shared "captured" slot meant a login on one server silently erased the other's
+    /// profile. A host that has no profile yet gets a new one. Sessions still overwrite in place —
+    /// a session is only good once, so a list of expired ones is a list of things that no longer
+    /// work. Your own profiles are left alone.
     /// </summary>
     private void AdoptCapturedSession(CapturedSession s)
     {
         if (IsDisposed) return;
         if (InvokeRequired) { try { BeginInvoke(() => AdoptCapturedSession(s)); } catch { } return; }
 
-        const string name = "Live (captured)";
-        var profile = _cfg.Servers.FirstOrDefault(p => p.Name == name);
+        var profile = _cfg.Servers.FirstOrDefault(p => p.Host == s.Host);
         if (profile is null)
         {
-            profile = new ServerProfile { Name = name };
+            profile = new ServerProfile { Name = $"Live {s.Host} (captured)" };
             _cfg.Servers.Add(profile);
         }
 
@@ -1083,8 +1211,13 @@ public sealed class MainForm : Form
         profile.Language = s.Language.Length > 0 ? s.Language : "en";
 
         // The version has to match what the launcher used or the live server refuses the client.
+        // It belongs to the install the launcher ran, so only clients under that path are
+        // updated — the other server's client may be on a different build.
         if (s.Version.Length > 0)
-            foreach (var c in _cfg.Clients) c.Version = s.Version;
+            foreach (var c in _cfg.Clients)
+                if (s.ExePath.Length == 0
+                    || s.ExePath.StartsWith(c.Path, StringComparison.OrdinalIgnoreCase))
+                    c.Version = s.Version;
 
         _cfg.SelectedServer = _cfg.Servers.IndexOf(profile);
         _cfg.Save();
@@ -1092,7 +1225,7 @@ public sealed class MainForm : Form
         RefreshProfileBoxes();
         OnServerChanged();
 
-        AppendLog($"Session filed as \"{name}\" — player {s.PlayerId} on {s.Host}. "
+        AppendLog($"Session filed as \"{profile.Name}\" — player {s.PlayerId} on {s.Host}. "
                 + "Click Launch game to spend it through the proxy.");
     }
 
@@ -1112,8 +1245,10 @@ public sealed class MainForm : Form
             {
                 MessageBox.Show(
                     $"Could not listen on {_cfg.ListenHost}:{_cfg.ListenPort}.\n\n{ex.Message}\n\n" +
-                    "Either another bsgobot is already running, or the game server is still " +
-                    "bound to 27050. The client hardcodes 27050, so the proxy must own it.",
+                    "Either another bsgobot is already running on this address, or the game " +
+                    "server is still bound to 27050. The client hardcodes the port but not the " +
+                    "IP, so a second instance must use its own loopback address — run it with " +
+                    "--config <file> and set ListenHost to 127.0.0.2 in that file.",
                     "Proxy failed to start", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
@@ -1163,6 +1298,37 @@ public sealed class MainForm : Form
 
     // ---------------------------------------------------------------- refresh
 
+    private double _uiWorstMs;
+    private DateTime _uiReportedAt = DateTime.UtcNow;
+
+    /// <summary>
+    /// Times the UI refresh and reports an overrun, at most once every 10 seconds.
+    ///
+    /// This handler runs on the message pump. Every millisecond it spends is a millisecond the
+    /// window is not responding to being dragged, clicked or raised — so when the app "feels
+    /// frozen", this is the number that says whether the cause is here or elsewhere.
+    /// </summary>
+    private void RefreshUiTimed()
+    {
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        try { RefreshUi(); }
+        finally
+        {
+            double ms = System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+            if (ms > _uiWorstMs) _uiWorstMs = ms;
+
+            var now = DateTime.UtcNow;
+            if ((now - _uiReportedAt).TotalSeconds >= 10)
+            {
+                if (_uiWorstMs > 80)
+                    AppendLog($"UI refresh is slow — {_uiWorstMs:F0}ms worst in the last 10s, "
+                            + "against a 250ms tick. The window will feel stuck.");
+                _uiReportedAt = now;
+                _uiWorstMs = 0;
+            }
+        }
+    }
+
     private void RefreshUi()
     {
         SyncDockButton();
@@ -1211,7 +1377,11 @@ public sealed class MainForm : Form
             new("loot taken", $"{_bot.LootTaken:N0}", _bot.LootTaken > 0 ? Theme.Good : Theme.Faint),
         ]);
 
-        _diag.SetText(_bot.Diagnostics());
+        // Gated like everything below it, and for the same reason — this one was simply missed.
+        // Diagnostics() walks the sector several times over and formats fifty-odd lines; doing
+        // that four times a second for a panel that is not on screen is the single most
+        // expensive thing the UI thread was doing.
+        if (_diag.Visible) _diag.SetText(_bot.Diagnostics());
         _header.Invalidate();
 
         // Only the visible view is refreshed. Rebuilding a contacts table nobody is looking at,

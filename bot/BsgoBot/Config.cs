@@ -125,8 +125,10 @@ public sealed class BotSettings
     /// <summary>Use the boost gear on long approaches. Costs tylium.</summary>
     public bool UseBoost { get; set; } = true;
 
-    /// <summary>Boost only while this much further out than the weapon reach we're heading for.</summary>
-    public float BoostMargin { get; set; } = 1500f;
+    /// <summary>Seconds of boost-speed travel left for coming down off the boost, on top of the
+    /// braking zone. Together they are the distance past which boosting is worth it. Replaced a
+    /// flat 1500u margin that was ~3x the real requirement, so mining hops never boosted.</summary>
+    public float BoostShedSeconds { get; set; } = 1.5f;
 
     /// <summary>Throttle used when the ship's Speed stat is unknown and you've never flown
     /// at full throttle yourself.</summary>
@@ -143,11 +145,13 @@ public sealed class BotSettings
     /// <summary>Steer and brake around solid objects that aren't the target.</summary>
     public bool AvoidCollisions { get; set; } = true;
 
-    /// <summary>Clearance added to an obstacle's own radius before it counts as in the way.</summary>
-    public float CollisionMargin { get; set; } = 130f;
+    /// <summary>Clearance added to an obstacle's own radius before it counts as in the way.
+    /// Floored by twice the ship's own hull radius, which is what it is really for.</summary>
+    public float CollisionMargin { get; set; } = 70f;
 
-    /// <summary>Distance to hold from an asteroid, in units from its centre. 0 = work it out.</summary>
-    public float AsteroidStandoff { get; set; } = 179f;
+    /// <summary>Gap to hold from an asteroid's SURFACE — the rock's radius is added on top.
+    /// 0 = work it out.</summary>
+    public float AsteroidStandoff { get; set; } = 120f;
 
     /// <summary>Distance to hold from a planetoid. They are far larger than asteroids.</summary>
     public float PlanetoidStandoff { get; set; } = 1200f;
@@ -177,6 +181,20 @@ public sealed class BotSettings
     /// <summary>Hull fraction below which the repair module is cast.</summary>
     public float RepairAtHull { get; set; } = 0.8f;
 
+    /// <summary>Answer the death screen, launch out of the hangar again and carry on farming,
+    /// instead of sitting docked until someone presses Undock.</summary>
+    public bool AutoUndock { get; set; } = true;
+
+    /// <summary>Buy the ship's condition back with titanium before launching. Never cubits.</summary>
+    public bool AutoRepairShip { get; set; } = true;
+
+    /// <summary>How long to sit in the hangar before launching — time for the client's death
+    /// sequence, the respawn and the repair to land.</summary>
+    public int UndockDelaySeconds { get; set; } = 6;
+
+    /// <summary>How long before asking to launch again when the last ask changed nothing.</summary>
+    public int RelaunchIntervalSeconds { get; set; } = 15;
+
     /// <summary>Keep clear of enemy weapon platforms and outposts.</summary>
     public bool AvoidHostileStations { get; set; } = true;
 
@@ -200,6 +218,39 @@ public sealed class BotSettings
 
     /// <summary>How long a scan result is trusted before the rock is worth re-scanning.</summary>
     public int ScanFreshnessSeconds { get; set; } = 900;
+
+    /// <summary>
+    /// Let the bot send dock requests. On, now that it locks the station first the way the client
+    /// does — the missing LockTarget is what dropped three sessions. Turn it off to retreat
+    /// without docking: the ship still shelters under the outpost's guns.
+    /// </summary>
+    public bool AllowDocking { get; set; } = true;
+
+    /// <summary>Shortest stay at a refuge before its hull trend may send us away again.</summary>
+    public float DockGiveUpSeconds { get; set; } = 10f;
+
+    /// <summary>Hull lost at a refuge before deciding it is not sheltering us and running on.
+    /// A measurement rather than a timer, because a post-combat dock cooldown can be long.</summary>
+    public float RefugeBleedFraction { get; set; } = 0.10f;
+
+    /// <summary>Room to leave around an asteroid, on top of 90% of its radius (the collider the
+    /// server actually builds). Small on purpose — rocks are what the ship threads between.</summary>
+    public float AsteroidCollisionMargin { get; set; } = 40f;
+
+    /// <summary>Room to leave around a planetoid, on top of its scaled radius. Large on purpose —
+    /// there are few of them, none are on the way anywhere, and we arrive at cruise.</summary>
+    public float PlanetoidCollisionMargin { get; set; } = 500f;
+
+    /// <summary>How much of a planetoid's published radius to treat as solid.</summary>
+    public float PlanetoidClearanceFactor { get; set; } = 1.25f;
+
+    /// <summary>How old the server's last statement of our own position may be before the bot
+    /// stops on arrival and waits for a fresh one instead of opening fire. Only bites when the
+    /// ship has flown since that fix — a parked ship's position cannot have drifted.</summary>
+    public float SelfPositionTrustSeconds { get; set; } = 4f;
+
+    /// <summary>How long to sit waiting for that fix before flying on with the estimate.</summary>
+    public float SelfPositionWaitSeconds { get; set; } = 6f;
 
     /// <summary>NPC kinds to hunt, by <c>SpaceEntityType</c> name. Empty means all of them.</summary>
     public List<string> Prey { get; set; } = [];
@@ -268,7 +319,13 @@ public sealed class Config
     public ClientProfile? CurrentClient =>
         Clients.Count == 0 ? null : Clients[Math.Clamp(SelectedClient, 0, Clients.Count - 1)];
 
-    private static string FilePath =>
+    /// <summary>
+    /// Where this instance's config lives. Defaults to bot.json next to the exe; overridden by
+    /// <c>--config &lt;file&gt;</c> so a second instance (farming the other server) can run from
+    /// the same build without the two fighting over one file. A relative path is resolved
+    /// against the exe folder, not the shell's working directory.
+    /// </summary>
+    public static string FilePath { get; set; } =
         System.IO.Path.Combine(AppContext.BaseDirectory, "bot.json");
 
     public static Config Load()
@@ -287,7 +344,26 @@ public sealed class Config
 
         cfg.SeedDefaults();
         cfg.MigrateUnboundSlots();
+        cfg.MigrateTuning();
         return cfg;
+    }
+
+    /// <summary>
+    /// Moves settings whose MEANING changed, not just their default.
+    ///
+    /// Only exact old defaults are touched. A number you typed in yourself is a decision and
+    /// stays put, even when the units under it have shifted — the alternative is a config file
+    /// that silently rewrites your choices every time the code learns something.
+    /// </summary>
+    private void MigrateTuning()
+    {
+        // Was a distance from the rock's CENTRE, now a gap to its surface. 179 from the centre of
+        // a typical rock is about 120 from its face, so an untouched default keeps its behaviour.
+        if (Math.Abs(Bot.AsteroidStandoff - 179f) < 0.01f) Bot.AsteroidStandoff = 120f;
+
+        // A flat 130u made a 38u rock into a 168u no-go sphere. The margin is for the ship, and
+        // it is now floored by the ship's own size instead of guessing large.
+        if (Math.Abs(Bot.CollisionMargin - 130f) < 0.01f) Bot.CollisionMargin = 70f;
     }
 
     /// <summary>

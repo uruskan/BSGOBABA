@@ -150,9 +150,68 @@ public sealed class GameActions(GameProxy proxy)
 
     public Task CancelDocking() => proxy.InjectAsync(Msg(GameOp.Request.CancelDocking));
 
-    /// <summary>Launch back into the sector. This is what "undock" is on the wire — the server's
-    /// JumpIn handler puts the ship back into the sector it is registered to.</summary>
+    /// <summary>
+    /// "I have loaded the sector, put my ship in it." The client sends this from
+    /// <c>SpaceLevel.Preload</c>, once every card of every object already in the sector has
+    /// arrived — never from a hangar. See <see cref="LeaveRoom"/> for undocking.
+    /// </summary>
     public Task JumpIn() => proxy.InjectAsync(Msg(GameOp.Request.JumpIn));
+
+    /// <summary>
+    /// Undock. This is the UNDOCK button, field for field: <c>RoomProtocol.Quit</c>, no payload.
+    ///
+    /// The client's own button does exactly this (<c>UndockButton.Undock</c>) for anyone who is
+    /// neither anchored nor sitting in a carrier. Everything after it is the server's move: it
+    /// takes us out of the room, the client loads the space level, and the client sends its own
+    /// JumpIn when it is ready. So the bot injects one message and then gets out of the way.
+    /// </summary>
+    public Task LeaveRoom() =>
+        proxy.InjectAsync(new BgoWriter((byte)ProtocolId.Room, (ushort)RoomOp.Request.Quit));
+
+    /// <summary>
+    /// Get off a carrier. The UNDOCK button sends this — not <see cref="LeaveRoom"/> — whenever
+    /// <c>Game.Me.Anchored</c> is set, and it is the first branch it tests. No payload.
+    /// </summary>
+    public Task RequestUnanchor() => proxy.InjectAsync(Msg(GameOp.Request.RequestUnanchor));
+
+    /// <summary>
+    /// Answer the death screen. The pair comes straight out of Reply.RespawnOptions, which sends
+    /// two equal-length id lists — sectors and the carrier player each one belongs to (0 for a
+    /// station). Client: GameProtocol.SelectRespawnLocation(RespawnLocationInfo).
+    /// </summary>
+    public Task SelectRespawnLocation(uint sectorId, uint carrierPlayerId)
+    {
+        var w = Msg(GameOp.Request.SelectRespawnLocation);
+        w.Write(sectorId);
+        w.Write(carrierPlayerId);
+        return proxy.InjectAsync(w);
+    }
+
+    private static BgoWriter PlayerMsg(PlayerOp.Request op) => new((byte)ProtocolId.Player, (ushort)op);
+
+    /// <summary>
+    /// The damage window's "repair all", for one hangar ship: hull condition and every fitted
+    /// system, in a single message. Titanium unless <paramref name="useCubits"/> — and cubits are
+    /// real money, so nothing in the bot passes true unless you ask for it.
+    /// </summary>
+    public Task RepairAll(ushort shipId, bool useCubits = false)
+    {
+        var w = PlayerMsg(PlayerOp.Request.RepairAll);
+        w.Write(shipId);
+        w.Write(useCubits);
+        return proxy.InjectAsync(w);
+    }
+
+    /// <summary>Buy back <paramref name="points"/> of hull condition only — no systems.
+    /// Kept because a server that ignores RepairAll may still answer this.</summary>
+    public Task RepairShip(ushort shipId, float points, bool useCubits = false)
+    {
+        var w = PlayerMsg(PlayerOp.Request.RepairShip);
+        w.Write(shipId);
+        w.Write(points);
+        w.Write(useCubits);
+        return proxy.InjectAsync(w);
+    }
 
     public Task SendCargoInteraction(uint cargoId, CargoInteraction action)
     {

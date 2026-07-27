@@ -54,6 +54,7 @@ public sealed class CatalogueSpy
     private readonly ConcurrentDictionary<uint, ShipAbilityCardInfo> _abilities = new();
     private readonly ConcurrentDictionary<uint, ShipSystemCardInfo> _systems = new();
     private readonly ConcurrentDictionary<uint, ShipListCardInfo> _shipLists = new();
+    private readonly ConcurrentDictionary<uint, OwnerCardInfo> _owners = new();
 
     /// <summary>Cards asked for but not yet answered, with when and how often we have asked.</summary>
     private readonly ConcurrentDictionary<CardKey, Attempt> _pending = new();
@@ -86,6 +87,7 @@ public sealed class CatalogueSpy
     public ShipAbilityCardInfo? Ability(uint guid) => _abilities.TryGetValue(guid, out var c) ? c : null;
     public ShipSystemCardInfo? System(uint guid) => _systems.TryGetValue(guid, out var c) ? c : null;
     public ShipListCardInfo? ShipList(uint guid) => _shipLists.TryGetValue(guid, out var c) ? c : null;
+    public OwnerCardInfo? Owner(uint guid) => _owners.TryGetValue(guid, out var c) ? c : null;
 
     public bool Has(uint guid, CardView view) => _raw.ContainsKey(new CardKey(guid, view));
 
@@ -149,6 +151,7 @@ public sealed class CatalogueSpy
                 CardView.ShipAbility => CardReader.ReadShipAbility(key.Guid, r),
                 CardView.ShipSystem => CardReader.ReadShipSystem(key.Guid, r),
                 CardView.ShipList => CardReader.ReadShipList(key.Guid, r),
+                CardView.Owner => CardReader.ReadOwner(key.Guid, r),
                 _ => null,
             };
         }
@@ -190,6 +193,10 @@ public sealed class CatalogueSpy
 
             case WorldCardInfo card:
                 _worlds[key.Guid] = card;
+                break;
+
+            case OwnerCardInfo card:
+                _owners[key.Guid] = card;
                 break;
 
             case ShipAbilityCardInfo card:

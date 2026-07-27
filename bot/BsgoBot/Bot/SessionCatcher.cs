@@ -11,7 +11,8 @@ public readonly record struct CapturedSession(
     string Session,
     string Version,
     string Language,
-    int ProcessId);
+    int ProcessId,
+    string ExePath);
 
 /// <summary>
 /// Watches for the real launcher's <c>bsgo.exe</c> and lifts the session off its command line.
@@ -45,6 +46,13 @@ public sealed class SessionCatcher : IDisposable
 
     public int PollMilliseconds { get; set; } = 200;
 
+    /// <summary>
+    /// With two live servers there can be two bot instances watching at once, and each launcher's
+    /// client is visible to both. Whichever instance this filter rejects leaves the client alone —
+    /// running and unkilled — for the instance it actually belongs to. Null accepts every host.
+    /// </summary>
+    public Func<string, bool>? AcceptHost { get; set; }
+
     public event Action<string>? Log;
     public event Action<CapturedSession>? Captured;
 
@@ -54,7 +62,7 @@ public sealed class SessionCatcher : IDisposable
         _seen.Clear();
         _cts = new CancellationTokenSource();
         _ = WatchAsync(_cts.Token);
-        Log?.Invoke("Session catcher armed — log in through the bsgo.fun launcher now.");
+        Log?.Invoke("Session catcher armed — log in through the game's own launcher now.");
     }
 
     public void Stop()
@@ -103,8 +111,16 @@ public sealed class SessionCatcher : IDisposable
                 if (host is null) continue;
 
                 // Our own relaunch goes through the proxy, which is local. Capturing that would
-                // overwrite a real session with a pointer to ourselves.
-                if (host is "127.0.0.1" or "localhost") continue;
+                // overwrite a real session with a pointer to ourselves. Any 127.x address counts:
+                // a second instance proxies on 127.0.0.2.
+                if (host.StartsWith("127.") || host == "localhost") continue;
+
+                if (AcceptHost is not null && !AcceptHost(host))
+                {
+                    Log?.Invoke($"Ignoring a client pointed at {host} — that server belongs to "
+                              + "another bot instance (or switch this one to it first).");
+                    continue;
+                }
 
                 var session = Flag(cmd, "+session");
                 if (session is null)
@@ -113,13 +129,18 @@ public sealed class SessionCatcher : IDisposable
                     continue;
                 }
 
+                string exePath;
+                try { exePath = p.MainModule?.FileName ?? ""; }
+                catch { exePath = ""; }
+
                 var captured = new CapturedSession(
                     host,
                     Flag(cmd, "+userID") ?? "",
                     session,
                     Flag(cmd, "+version") ?? "",
                     Flag(cmd, "+language") ?? "en",
-                    p.Id);
+                    p.Id,
+                    exePath);
 
                 Log?.Invoke($"Captured a session from the launcher's client (pid {p.Id}): "
                           + $"{host}, player {captured.PlayerId}, version {captured.Version}.");
