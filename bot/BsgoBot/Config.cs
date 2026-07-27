@@ -1,4 +1,7 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
+using BsgoBot.Bot;
+using BsgoBot.Protocol;
 
 namespace BsgoBot;
 
@@ -108,179 +111,6 @@ public sealed class ServerProfile
 
     public override string ToString() => $"{Name}  ({Host}:{Port})";
 }
-
-/// <summary>Everything you can tune about how the farm loop behaves.</summary>
-public sealed class BotSettings
-{
-    /// <summary>Reach assumed for a weapon the server never published a range for.</summary>
-    public float FallbackRange { get; set; } = 3000f;
-
-    /// <summary>Cadence assumed for a weapon with no cooldown stat.</summary>
-    public int FallbackFireIntervalMs { get; set; } = 900;
-
-    public bool AutoApproach { get; set; } = true;
-    public bool AutoLoot { get; set; } = true;
-    public float LootRange { get; set; } = 600f;
-
-    /// <summary>Use the boost gear on long approaches. Costs tylium.</summary>
-    public bool UseBoost { get; set; } = true;
-
-    /// <summary>Seconds of boost-speed travel left for coming down off the boost, on top of the
-    /// braking zone. Together they are the distance past which boosting is worth it. Replaced a
-    /// flat 1500u margin that was ~3x the real requirement, so mining hops never boosted.</summary>
-    public float BoostShedSeconds { get; set; } = 1.5f;
-
-    /// <summary>Throttle used when the ship's Speed stat is unknown and you've never flown
-    /// at full throttle yourself.</summary>
-    public float FallbackSpeed { get; set; } = 100f;
-
-    /// <summary>Your ship's real top speed in the regular gear, typed in. Beats the published
-    /// stat, the fallback and anything watched off your own throttle. 0 = work it out.</summary>
-    public float TopSpeedOverride { get; set; }
-
-    /// <summary>Your ship's speed in the boost gear, typed in. Without this, a server that
-    /// publishes no BoostSpeed stat means the bot never boosts at all. 0 = work it out.</summary>
-    public float BoostSpeedOverride { get; set; }
-
-    /// <summary>Steer and brake around solid objects that aren't the target.</summary>
-    public bool AvoidCollisions { get; set; } = true;
-
-    /// <summary>Clearance added to an obstacle's own radius before it counts as in the way.
-    /// Floored by twice the ship's own hull radius, which is what it is really for.</summary>
-    public float CollisionMargin { get; set; } = 70f;
-
-    /// <summary>Gap to hold from an asteroid's SURFACE — the rock's radius is added on top.
-    /// 0 = work it out.</summary>
-    public float AsteroidStandoff { get; set; } = 120f;
-
-    /// <summary>Distance to hold from a planetoid. They are far larger than asteroids.</summary>
-    public float PlanetoidStandoff { get; set; } = 1200f;
-
-    /// <summary>Where to stop on a Go to / Follow run from the contacts list, in units from the
-    /// contact's centre. Floored by the contact's own radius, so a planetoid still gets room.</summary>
-    public float FollowDistance { get; set; } = 350f;
-
-    /// <summary>Stop fighting below this fraction of hull.</summary>
-    public float RetreatHull { get; set; } = 0.25f;
-
-    /// <summary>Shoot back at hostiles while mining instead of ignoring them.</summary>
-    public bool DefendSelf { get; set; } = true;
-
-    /// <summary>A hostile nearer than this counts as a threat. Anything targeting us always does.</summary>
-    public float ThreatRange { get; set; } = 1500f;
-
-    /// <summary>On low hull, fly away from the threat rather than just cutting the engines.</summary>
-    public bool FleeWhenHurt { get; set; } = true;
-
-    /// <summary>When fleeing, run to a friendly outpost rather than into open space.</summary>
-    public bool FleeToOutpost { get; set; } = true;
-
-    /// <summary>Cast the self-repair module (Strike Damage Control and friends) when hurt.</summary>
-    public bool UseRepairAbility { get; set; } = true;
-
-    /// <summary>Hull fraction below which the repair module is cast.</summary>
-    public float RepairAtHull { get; set; } = 0.8f;
-
-    /// <summary>Answer the death screen, launch out of the hangar again and carry on farming,
-    /// instead of sitting docked until someone presses Undock.</summary>
-    public bool AutoUndock { get; set; } = true;
-
-    /// <summary>Buy the ship's condition back with titanium before launching. Never cubits.</summary>
-    public bool AutoRepairShip { get; set; } = true;
-
-    /// <summary>How long to sit in the hangar before launching — time for the client's death
-    /// sequence, the respawn and the repair to land.</summary>
-    public int UndockDelaySeconds { get; set; } = 6;
-
-    /// <summary>How long before asking to launch again when the last ask changed nothing.</summary>
-    public int RelaunchIntervalSeconds { get; set; } = 15;
-
-    /// <summary>Keep clear of enemy weapon platforms and outposts.</summary>
-    public bool AvoidHostileStations { get; set; } = true;
-
-    /// <summary>How far to stay from an enemy emplacement. A conservative guess — the server
-    /// never publishes their reach, so raise it if something still reaches you.</summary>
-    public float HostileStationKeepOut { get; set; } = 2500f;
-
-    /// <summary>While flying in, hold each weapon until its own optimal range.</summary>
-    public bool HoldFireUntilOptimal { get; set; } = true;
-
-    public bool AttackPlayers { get; set; }
-
-    /// <summary>Also order a mining ship to the rock, which costs resources.</summary>
-    public bool UseMiningFacility { get; set; }
-
-    /// <summary>Fire combat guns at asteroids alongside the mining laser.</summary>
-    public bool FireGunsWhileMining { get; set; } = true;
-
-    /// <summary>Stop scanning once this many confirmed rocks are queued up.</summary>
-    public int ScanQueueDepth { get; set; } = 2;
-
-    /// <summary>How long a scan result is trusted before the rock is worth re-scanning.</summary>
-    public int ScanFreshnessSeconds { get; set; } = 900;
-
-    /// <summary>
-    /// Let the bot send dock requests. On, now that it locks the station first the way the client
-    /// does — the missing LockTarget is what dropped three sessions. Turn it off to retreat
-    /// without docking: the ship still shelters under the outpost's guns.
-    /// </summary>
-    public bool AllowDocking { get; set; } = true;
-
-    /// <summary>Shortest stay at a refuge before its hull trend may send us away again.</summary>
-    public float DockGiveUpSeconds { get; set; } = 10f;
-
-    /// <summary>Hull lost at a refuge before deciding it is not sheltering us and running on.
-    /// A measurement rather than a timer, because a post-combat dock cooldown can be long.</summary>
-    public float RefugeBleedFraction { get; set; } = 0.10f;
-
-    /// <summary>Room to leave around an asteroid, on top of 90% of its radius (the collider the
-    /// server actually builds). Small on purpose — rocks are what the ship threads between.</summary>
-    public float AsteroidCollisionMargin { get; set; } = 40f;
-
-    /// <summary>Room to leave around a planetoid, on top of its scaled radius. Large on purpose —
-    /// there are few of them, none are on the way anywhere, and we arrive at cruise.</summary>
-    public float PlanetoidCollisionMargin { get; set; } = 500f;
-
-    /// <summary>How much of a planetoid's published radius to treat as solid.</summary>
-    public float PlanetoidClearanceFactor { get; set; } = 1.25f;
-
-    /// <summary>How old the server's last statement of our own position may be before the bot
-    /// stops on arrival and waits for a fresh one instead of opening fire. Only bites when the
-    /// ship has flown since that fix — a parked ship's position cannot have drifted.</summary>
-    public float SelfPositionTrustSeconds { get; set; } = 4f;
-
-    /// <summary>How long to sit waiting for that fix before flying on with the estimate.</summary>
-    public float SelfPositionWaitSeconds { get; set; } = 6f;
-
-    /// <summary>NPC kinds to hunt, by <c>SpaceEntityType</c> name. Empty means all of them.</summary>
-    public List<string> Prey { get; set; } = [];
-
-    /// <summary>
-    /// Ask the server for catalogue cards the bot hasn't seen, rather than only reading the ones
-    /// the client happens to fetch.
-    ///
-    /// Default OFF because it is the only feature that injects traffic the real client never
-    /// asked for, and it is the prime suspect for sessions being dropped. Passive sniffing still
-    /// fills the catalogue from the client's own browsing either way — this only controls whether
-    /// we ASK. Turn it on to test, and if the client starts dropping, turn it back off.
-    /// </summary>
-    public bool FetchCatalogue { get; set; }
-
-    /// <summary>Distance at which a rock is worth half its ore, when choosing which to fly to.
-    /// Lower keeps the ship local; higher lets it range for a big find. At 1000 a rock 2,000u out
-    /// needs 5x the ore to win, and one 5,000u out needs 26x.</summary>
-    public float RockTravelPenalty { get; set; } = 1000f;
-
-    /// <summary>Resource to mine, by <c>ResourceType</c> name. Superseded by
-    /// <see cref="WantedResources"/> and kept only so an existing bot.json still means what it
-    /// meant — it is migrated on load and then left alone.</summary>
-    public string WantedResource { get; set; } = "Any";
-
-    /// <summary>Resources to mine, by <c>ResourceType</c> name, BEST FIRST. The order is the
-    /// priority, not just a set. Empty takes whatever is nearest.</summary>
-    public List<string> WantedResources { get; set; } = [];
-}
-
 /// <summary>A game client install. Version is per-build, so it belongs to the client,
 /// not the server.</summary>
 public sealed class ClientProfile
@@ -301,7 +131,15 @@ public sealed class Config
     /// <summary>Start relaying as soon as the window opens, so you can't forget.</summary>
     public bool AutoStartProxy { get; set; } = true;
 
-    public BotSettings Bot { get; set; } = new();
+    /// <summary>
+    /// Everything you can tune about how the farm loop behaves.
+    ///
+    /// This is the same object the running bot flies on — <c>MainForm</c> assigns it straight to
+    /// <see cref="Bot.FarmBot.T"/> rather than copying it property by property, which is what
+    /// this used to be: a parallel <c>BotSettings</c> class listing 47 of the bot's 77 settings,
+    /// hand-copied across on every load. The other 30 were unreachable from this file entirely.
+    /// </summary>
+    public BotTuning Bot { get; set; } = new();
 
     public List<ServerProfile> Servers { get; set; } = [];
     public List<ClientProfile> Clients { get; set; } = [];
@@ -328,13 +166,27 @@ public sealed class Config
     public static string FilePath { get; set; } =
         System.IO.Path.Combine(AppContext.BaseDirectory, "bot.json");
 
+    /// <summary>
+    /// How bot.json is read and written.
+    ///
+    /// The enum converter is not cosmetic. <see cref="BotTuning.Prey"/> and
+    /// <see cref="BotTuning.WantedResources"/> are enum collections, and System.Text.Json
+    /// writes enums as integers unless told otherwise — which would turn a readable
+    /// <c>["Water", "Tylium"]</c> into <c>[3, 7]</c> and refuse to read the old file back.
+    /// </summary>
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        WriteIndented = true,
+        Converters = { new JsonStringEnumConverter() },
+    };
+
     public static Config Load()
     {
         Config cfg;
         try
         {
             cfg = File.Exists(FilePath)
-                ? JsonSerializer.Deserialize<Config>(File.ReadAllText(FilePath)) ?? new Config()
+                ? JsonSerializer.Deserialize<Config>(File.ReadAllText(FilePath), JsonOptions) ?? new Config()
                 : new Config();
         }
         catch
@@ -364,6 +216,28 @@ public sealed class Config
         // A flat 130u made a 38u rock into a 168u no-go sphere. The margin is for the ship, and
         // it is now floored by the ship's own size instead of guessing large.
         if (Math.Abs(Bot.CollisionMargin - 130f) < 0.01f) Bot.CollisionMargin = 70f;
+
+        // Renamed when the settings moved onto BotTuning. Only an older file carries the old key.
+        if (Bot.AutoRepairShip is { } legacyRepair)
+        {
+            Bot.AutoRepair = legacyRepair;
+            Bot.AutoRepairShip = null;
+        }
+
+        // An older bot.json only ever held one resource. Promote it to a one-entry priority list
+        // the first time, so the setting you picked keeps meaning what it did.
+        if (Bot.WantedResources.Count == 0
+            && Enum.TryParse<ResourceType>(Bot.WantedResource, out var legacyResource)
+            && legacyResource != ResourceType.Any)
+        {
+            Bot.WantedResources.Add(legacyResource);
+        }
+        Bot.WantedResource = null;
+
+        // Filtered against what a rock can actually hold: an earlier build offered cubits, uranium
+        // and plutonium, so a saved list can still rank things that will never match. Left in
+        // place they would occupy priority slots above resources that do exist.
+        Bot.WantedResources.RemoveAll(r => !Resources.IsMinable(r));
     }
 
     /// <summary>
@@ -417,6 +291,5 @@ public sealed class Config
     }
 
     public void Save() =>
-        File.WriteAllText(FilePath,
-            JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
+        File.WriteAllText(FilePath, JsonSerializer.Serialize(this, JsonOptions));
 }

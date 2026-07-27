@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using BsgoBot.Protocol;
 using BsgoBot.World;
 
@@ -162,7 +163,7 @@ public sealed class BotTuning
     /// Which NPC kinds to hunt. Empty means all of them. Populated from the toolbar so you
     /// can farm fighters and leave the cruisers alone (or the reverse).
     /// </summary>
-    public HashSet<SpaceEntityType> Prey { get; } = [];
+    public HashSet<SpaceEntityType> Prey { get; set; } = [];
 
     /// <summary>
     /// Only mine asteroids whose scan says they hold this resource. <see cref="ResourceType.Any"/>
@@ -177,7 +178,25 @@ public sealed class BotTuning
     /// rock already being worked is finished rather than abandoned the moment something
     /// higher-ranked respawns, because the damage already put into it would be thrown away.
     /// </summary>
-    public List<ResourceType> WantedResources { get; } = [];
+    /// <remarks>Settable, unlike the get-only collection this used to be: bot.json is now
+    /// deserialized straight into this object, and System.Text.Json skips a get-only collection
+    /// rather than populating it — which would silently drop a saved resource list on load.</remarks>
+    public List<ResourceType> WantedResources { get; set; } = [];
+
+    /// <summary>
+    /// Superseded by <see cref="WantedResources"/>, kept only so an existing bot.json still means
+    /// what it meant. Read once by <c>Config.MigrateTuning</c>, then cleared — so it survives
+    /// exactly one save and then stops cluttering the file.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? WantedResource { get; set; }
+
+    /// <summary>
+    /// What <see cref="AutoRepair"/> was called in bot.json before the settings moved here.
+    /// Migration only, never read by the bot, and dropped from the file once folded in.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? AutoRepairShip { get; set; }
 
     /// <summary>Also order a mining ship to the asteroid (costs resources) as well as
     /// firing your own mining laser.</summary>

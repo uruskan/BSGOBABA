@@ -244,77 +244,19 @@ public sealed class MainForm : Form
         }).ToList();
     }
 
-    private void ApplySettingsToBot()
-    {
-        var b = _cfg.Bot;
-        _bot.T.FallbackRange = b.FallbackRange;
-        _bot.T.FallbackFireIntervalMs = b.FallbackFireIntervalMs;
-        _bot.T.AutoApproach = b.AutoApproach;
-        _bot.T.UseBoost = b.UseBoost;
-        _bot.T.BoostShedSeconds = b.BoostShedSeconds;
-        _bot.T.FallbackSpeed = b.FallbackSpeed;
-        _bot.T.TopSpeedOverride = b.TopSpeedOverride;
-        _bot.T.BoostSpeedOverride = b.BoostSpeedOverride;
-        _bot.T.AvoidCollisions = b.AvoidCollisions;
-        _bot.T.CollisionMargin = b.CollisionMargin;
-        _bot.T.RockTravelPenalty = b.RockTravelPenalty;
-        _bot.T.FetchCatalogue = b.FetchCatalogue;
-        _bot.T.AsteroidStandoff = b.AsteroidStandoff;
-        _bot.T.PlanetoidStandoff = b.PlanetoidStandoff;
-        _bot.T.FollowDistance = b.FollowDistance;
-        _bot.T.AutoLoot = b.AutoLoot;
-        _bot.T.LootRange = b.LootRange;
-        _bot.T.RetreatHull = b.RetreatHull;
-        _bot.T.AttackPlayers = b.AttackPlayers;
-        _bot.T.UseMiningFacility = b.UseMiningFacility;
-        _bot.T.FireGunsWhileMining = b.FireGunsWhileMining;
-        _bot.T.ScanQueueDepth = b.ScanQueueDepth;
-        _bot.T.ScanFreshnessSeconds = b.ScanFreshnessSeconds;
-        _bot.T.AllowDocking = b.AllowDocking;
-        _bot.T.DockGiveUpSeconds = b.DockGiveUpSeconds;
-        _bot.T.RefugeBleedFraction = b.RefugeBleedFraction;
-        _bot.T.AsteroidCollisionMargin = b.AsteroidCollisionMargin;
-        _bot.T.PlanetoidCollisionMargin = b.PlanetoidCollisionMargin;
-        _bot.T.PlanetoidClearanceFactor = b.PlanetoidClearanceFactor;
-        _bot.T.SelfPositionTrustSeconds = b.SelfPositionTrustSeconds;
-        _bot.T.SelfPositionWaitSeconds = b.SelfPositionWaitSeconds;
-        _bot.T.FleeToOutpost = b.FleeToOutpost;
-        _bot.T.UseRepairAbility = b.UseRepairAbility;
-        _bot.T.RepairAtHull = b.RepairAtHull;
-        _bot.T.AutoUndock = b.AutoUndock;
-        _bot.T.AutoRepair = b.AutoRepairShip;
-        _bot.T.UndockDelaySeconds = b.UndockDelaySeconds;
-        _bot.T.RelaunchIntervalSeconds = b.RelaunchIntervalSeconds;
-        _bot.T.AvoidHostileStations = b.AvoidHostileStations;
-        _bot.T.HostileStationKeepOut = b.HostileStationKeepOut;
-        _bot.T.HoldFireUntilOptimal = b.HoldFireUntilOptimal;
-        _bot.T.DefendSelf = b.DefendSelf;
-        _bot.T.ThreatRange = b.ThreatRange;
-        _bot.T.FleeWhenHurt = b.FleeWhenHurt;
-
-        _bot.T.Prey.Clear();
-        foreach (var name in b.Prey)
-            if (Enum.TryParse<SpaceEntityType>(name, out var t)) _bot.T.Prey.Add(t);
-
-        // Migration: an existing bot.json only ever held one resource. Promote it to a one-entry
-        // priority list the first time, so the setting the user picked keeps meaning what it did.
-        if (b.WantedResources.Count == 0
-            && Enum.TryParse<ResourceType>(b.WantedResource, out var legacy)
-            && legacy != ResourceType.Any)
-        {
-            b.WantedResources = [legacy.ToString()];
-        }
-
-        // Filtered against what a rock can actually hold: an earlier build offered cubits,
-        // uranium and plutonium, so a saved list can still rank things that will never match.
-        // Left in place they would occupy priority slots above resources that do exist.
-        _bot.T.WantedResources.Clear();
-        foreach (var name in b.WantedResources)
-            if (Enum.TryParse<ResourceType>(name, out var r) && Resources.IsMinable(r))
-                _bot.T.WantedResources.Add(r);
-
-        b.WantedResources = _bot.T.WantedResources.Select(r => r.ToString()).ToList();
-    }
+    /// <summary>
+    /// Hands the bot its tuning.
+    ///
+    /// One assignment, not 77. This used to copy every setting across by hand, which meant a new
+    /// tunable was three edits — Config, here, and FarmBot — and thirty of the bot's settings had
+    /// simply never been given an entry, so bot.json could not reach them at all.
+    ///
+    /// The bot now flies on the very object the config holds, so a change made anywhere is live
+    /// immediately and <see cref="Config.Save"/> writes exactly what the bot is using. The
+    /// migrations that used to sit here moved to <c>Config.MigrateTuning</c>, which runs on load
+    /// and is where anything reading an outdated bot.json belongs.
+    /// </summary>
+    private void ApplySettingsToBot() => _bot.T = _cfg.Bot;
 
     /// <summary>
     /// Rebuilds the mining filter from the chips, preserving the order they were switched ON —
@@ -322,7 +264,7 @@ public sealed class MainForm : Form
     /// </summary>
     private void ApplyResources()
     {
-        _cfg.Bot.WantedResources = _bot.T.WantedResources.Select(r => r.ToString()).ToList();
+        // No copy back into the config: _bot.T and _cfg.Bot are the same object now.
         foreach (var chip in _resourceChips) RankChip(chip);
     }
 
@@ -340,7 +282,6 @@ public sealed class MainForm : Form
         _bot.T.Prey.Clear();
         foreach (var chip in _preyChips)
             if (chip.Checked && chip.Tag2 is SpaceEntityType t) _bot.T.Prey.Add(t);
-        _cfg.Bot.Prey = _bot.T.Prey.Select(t => t.ToString()).ToList();
     }
 
     // ---------------------------------------------------------------- layout
@@ -544,9 +485,9 @@ public sealed class MainForm : Form
 
         // Warn-tinted: it is the one switch that spends a resource on its own.
         _chipHangarRepair.Tint = Theme.Warn;
-        _chipHangarRepair.Checked = _cfg.Bot.AutoRepairShip;
+        _chipHangarRepair.Checked = _cfg.Bot.AutoRepair;
         _chipHangarRepair.CheckedChanged += (_, _) =>
-            _bot.T.AutoRepair = _cfg.Bot.AutoRepairShip = _chipHangarRepair.Checked;
+            _bot.T.AutoRepair = _chipHangarRepair.Checked;
 
         _chipAvoidRocks.Tint = Theme.Bad;
         _chipAvoidRocks.Checked = _cfg.Bot.AvoidCollisions;
@@ -880,7 +821,7 @@ public sealed class MainForm : Form
         };
         foreach (var t in PreyChoices)
         {
-            var chip = new ToggleChip(t.ToString(), _cfg.Bot.Prey.Contains(t.ToString()))
+            var chip = new ToggleChip(t.ToString(), _cfg.Bot.Prey.Contains(t))
             {
                 Tag2 = t,
                 Margin = new Padding(0, 0, 5, 5),
