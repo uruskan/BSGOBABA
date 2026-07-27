@@ -11,24 +11,6 @@ public sealed partial class FarmBot
 {
     // ------------------------------------------------------------------ docking
 
-    /// <summary>
-    /// Whether the bot may send a dock request at all.
-    ///
-    /// On, now that the sequence is right. It was briefly off for good reason: three dock
-    /// requests had ever been sent — 02:18:54, 02:34:54 and 13:37:15 on 27 Jul — and the server
-    /// hung up 78ms, 364ms and 80ms later, with no case of one working.
-    ///
-    /// Neither the message nor the range was ever the problem. A real dock captured off the wire
-    /// is <c>022D000100004A00000000</c>, which is byte-for-byte what the bot sent, and the same
-    /// outpost accepted a manual dock from 791u while the bot was asking from 248u. What was
-    /// missing was the LockTarget in front of it — see <see cref="LockBeforeDockAsync"/>.
-    ///
-    /// Kept as a switch because it is the one action with a proven history of ending sessions.
-    /// Turning it off costs nothing but the last step: the retreat still runs to the outpost and
-    /// shelters under its guns, which is the part that saves the ship.
-    /// </summary>
-    public bool AllowDocking { get; set; } = true;
-
     /// <summary>Until when the server says a docking countdown is running, from Reply.DockingDelay.
     /// The client disables its dock button for exactly this long, so a second request inside the
     /// window is something the real client can never send.</summary>
@@ -136,29 +118,6 @@ public sealed partial class FarmBot
         return (DateTime.UtcNow - _dockLockedAt).TotalMilliseconds < DockLockSettleMs;
     }
 
-    /// <summary>How close to get before asking to dock, when nothing has been learned yet.</summary>
-    public float DockApproach { get; set; } = 250f;
-
-    /// <summary>Give up on a dock run after this long.</summary>
-    public int DockTimeoutSeconds { get; set; } = 90;
-
-    /// <summary>
-    /// The shortest time we will spend at a refuge before its hull trend is allowed to send us
-    /// away. Hysteresis, not a deadline: one burst of damage on arrival must not abandon an
-    /// outpost that is about to let us in.
-    /// </summary>
-    public float DockGiveUpSeconds { get; set; } = 10f;
-
-    /// <summary>
-    /// How much hull we will lose at a refuge before deciding it is not sheltering us.
-    ///
-    /// This replaced a flat 10s timeout, which was wrong in exactly the case it was written for:
-    /// a dock cooldown after combat can run to tens of seconds, and a short timer abandons a good
-    /// outpost while its countdown is still ticking. Whether the shelter is working is a thing we
-    /// can measure — 0.10 is ten points of hull lost since the best reading since arriving.
-    /// </summary>
-    public float RefugeBleedFraction { get; set; } = 0.10f;
-
     public bool IsDocking => _docking;
 
     /// <summary>
@@ -229,32 +188,6 @@ public sealed partial class FarmBot
 
     // ------------------------------------------------------------------ death & relaunch
 
-    /// <summary>
-    /// Get the ship back out of the hangar by itself: answer the death screen, buy the hull
-    /// condition back, launch, and carry on farming.
-    ///
-    /// Off means a death ends the session in every practical sense — the farm loop keeps ticking
-    /// against a ship that is not in the sector and does nothing at all until someone presses
-    /// Undock.
-    /// </summary>
-    public bool AutoUndock { get; set; } = true;
-
-    /// <summary>Buy the ship's condition back before launching, with titanium. Dying always costs
-    /// condition, and a wrecked hull launches with a fraction of its stats.</summary>
-    public bool AutoRepair { get; set; } = true;
-
-    /// <summary>
-    /// How long to sit in the hangar before launching.
-    ///
-    /// Not politeness: the client has its own death sequence to play out, the repair has to be
-    /// asked for and answered, and the server will not launch a ship it still thinks is dead. Six
-    /// seconds is enough for all three without making a death cost a minute of farming.
-    /// </summary>
-    public int UndockDelaySeconds { get; set; } = 6;
-
-    /// <summary>How long to wait before asking to launch again when the first ask changed nothing.</summary>
-    public int RelaunchIntervalSeconds { get; set; } = 15;
-
     /// <summary>Times we've been destroyed this session.</summary>
     public int Deaths { get; private set; }
 
@@ -288,7 +221,7 @@ public sealed partial class FarmBot
         _lastRespawnOffer = options;
         _diedHere = true;
         Log?.Invoke($"Death screen: {options.Count} respawn location(s) offered"
-                  + (AutoUndock ? "." : " — auto undock is off, so pick one in the client."));
+                  + (T.AutoUndock ? "." : " — auto undock is off, so pick one in the client."));
     }
 
     private void OnShipCondition(ushort shipId, float durability)
@@ -329,10 +262,6 @@ public sealed partial class FarmBot
     private DateTime? _anchoredSince;
     private DateTime _lastUnanchorAsk = DateTime.MinValue;
     private int _unanchorAsks;
-
-    /// <summary>Wait this long after anchoring before asking to launch, so a carrier you boarded
-    /// on purpose is not immediately thrown off it.</summary>
-    public int UnanchorDelaySeconds { get; set; } = 4;
 
     private void OnAnchorChanged(uint carrier)
     {
@@ -380,20 +309,20 @@ public sealed partial class FarmBot
         var carrier = _world.Get(_world.AnchoredTo);
         string riding = carrier is not null ? carrier.ToString() : $"#{_world.AnchoredTo:X8}";
 
-        if (!AutoUndock || !Enabled)
+        if (!T.AutoUndock || !Enabled)
         {
             Status = $"Anchored to {riding} — riding along";
             return true;
         }
 
         double waited = (now - _anchoredSince.Value).TotalSeconds;
-        if (waited < UnanchorDelaySeconds)
+        if (waited < T.UnanchorDelaySeconds)
         {
-            Status = $"Anchored to {riding} — launching in {UnanchorDelaySeconds - waited:F0}s";
+            Status = $"Anchored to {riding} — launching in {T.UnanchorDelaySeconds - waited:F0}s";
             return true;
         }
 
-        if ((now - _lastUnanchorAsk).TotalSeconds >= RelaunchIntervalSeconds)
+        if ((now - _lastUnanchorAsk).TotalSeconds >= T.RelaunchIntervalSeconds)
         {
             _lastUnanchorAsk = now;
             _unanchorAsks++;
@@ -455,7 +384,7 @@ public sealed partial class FarmBot
         var now = DateTime.UtcNow;
         _hangarSince ??= now;
 
-        if (!AutoUndock || !Enabled) return false;
+        if (!T.AutoUndock || !Enabled) return false;
 
         // A death screen blocks everything else: the server will not launch a dead ship, and
         // nothing else answers this message once the bot is flying.
@@ -489,9 +418,9 @@ public sealed partial class FarmBot
         if (await RepairInHangarAsync(now)) return true;
 
         double waited = (now - _hangarSince.Value).TotalSeconds;
-        if (waited < UndockDelaySeconds)
+        if (waited < T.UndockDelaySeconds)
         {
-            Status = $"In the hangar — launching in {UndockDelaySeconds - waited:F0}s";
+            Status = $"In the hangar — launching in {T.UndockDelaySeconds - waited:F0}s";
             return true;
         }
 
@@ -506,7 +435,7 @@ public sealed partial class FarmBot
             return true;
         }
 
-        if ((now - _lastLaunchAsk).TotalSeconds >= RelaunchIntervalSeconds)
+        if ((now - _lastLaunchAsk).TotalSeconds >= T.RelaunchIntervalSeconds)
         {
             _lastLaunchAsk = now;
             _launchAsks++;
@@ -536,7 +465,7 @@ public sealed partial class FarmBot
     /// </summary>
     private async Task<bool> RepairInHangarAsync(DateTime now)
     {
-        if (!AutoRepair || _world.MyShipId == 0) return false;
+        if (!T.AutoRepair || _world.MyShipId == 0) return false;
 
         if (!_repairAsked)
         {
@@ -585,7 +514,7 @@ public sealed partial class FarmBot
         // A countdown the server itself imposed is not the run failing, it is the run working —
         // so the timeout stands down while one is ticking. A dock delay after combat can be tens
         // of seconds, which would otherwise abandon a dock that was about to complete.
-        if (!DockCountdownRunning && (DateTime.UtcNow - _dockStarted).TotalSeconds > DockTimeoutSeconds)
+        if (!DockCountdownRunning && (DateTime.UtcNow - _dockStarted).TotalSeconds > T.DockTimeoutSeconds)
         {
             Status = "Gave up docking — took too long";
             Log?.Invoke("Dock run timed out.");
@@ -607,16 +536,16 @@ public sealed partial class FarmBot
 
         await StopThrottleIfMoving();
 
-        // Arrived, but the request itself is the dangerous part — see AllowDocking. The run ends
+        // Arrived, but the request itself is the dangerous part — see T.AllowDocking. The run ends
         // here rather than pretending to continue, because the ship is where it was asked to be.
-        if (!AllowDocking)
+        if (!T.AllowDocking)
         {
             _docking = false;
             Status = $"At {station} ({dist:F0}u) — not docking, it drops the session";
             Log?.Invoke($"Arrived at #{station.Id:X8} ({dist:F0}u) but did not send a dock "
                       + "request: every one the bot has sent ended the session within 400ms. "
                       + "Dock by hand — the bot reads your request and learns from it — or set "
-                      + "AllowDocking in bot.json.");
+                      + "T.AllowDocking in bot.json.");
             return;
         }
 

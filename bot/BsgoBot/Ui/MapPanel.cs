@@ -517,11 +517,11 @@ public sealed class MapPanel : Control
 
     private float WeaponReach()
     {
-        var role = _bot.Mode == FarmMode.Mining ? WeaponRole.Mining : WeaponRole.Combat;
+        var role = _bot.T.Mode == FarmMode.Mining ? WeaponRole.Mining : WeaponRole.Combat;
         var guns = _bot.Weapons.For(role);
-        if (guns.Count == 0) return _bot.FallbackRange;
+        if (guns.Count == 0) return _bot.T.FallbackRange;
         var known = guns.Where(x => x.MaxRange is > 0).Select(x => x.MaxRange!.Value).ToList();
-        return known.Count > 0 ? known.Max() : _bot.FallbackRange;
+        return known.Count > 0 ? known.Max() : _bot.T.FallbackRange;
     }
 
     /// <summary>Rounds a grid step to 1/2/5 x 10^n so the spacing is always a readable number.</summary>

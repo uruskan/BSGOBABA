@@ -49,7 +49,7 @@ public sealed partial class FarmBot
     /// </summary>
     public void PrefetchRosters()
     {
-        if (!FetchCatalogue)
+        if (!T.FetchCatalogue)
         {
             Log?.Invoke("Card fetching is off — turn on \"Fetch cards\" first.");
             return;
@@ -88,7 +88,7 @@ public sealed partial class FarmBot
     /// </summary>
     private void OnObjectIdentified(uint objectId, uint cardGuid, SpaceEntityType type)
     {
-        if (!FetchCatalogue) return;
+        if (!T.FetchCatalogue) return;
 
         bool isShip = EntityTypes.IsShip(objectId);
         bool worthKnowing = isShip
@@ -120,7 +120,7 @@ public sealed partial class FarmBot
         {
             Deaths++;
             _diedHere = true;
-            Log?.Invoke(AutoUndock
+            Log?.Invoke(T.AutoUndock
                 ? $"Destroyed (death #{Deaths}). Waiting for the respawn options."
                 : $"Destroyed (death #{Deaths}). Auto undock is off — respawn in the client.");
         }
@@ -503,9 +503,9 @@ public sealed partial class FarmBot
         }
 
         var o = _world.Get(id);
-        bool suits = Mode == FarmMode.Mining ? EntityTypes.IsMinable(id) : !EntityTypes.IsMinable(id);
+        bool suits = T.Mode == FarmMode.Mining ? EntityTypes.IsMinable(id) : !EntityTypes.IsMinable(id);
         Log?.Invoke($"Pinned {o?.ToString() ?? $"#{id:X8}"} as the target."
-                  + (suits ? "" : $" It is not a {Mode} target, so switch mode or it will be dropped."));
+                  + (suits ? "" : $" It is not a {T.Mode} target, so switch mode or it will be dropped."));
     }
 
     public void Unpin()
@@ -546,7 +546,7 @@ public sealed partial class FarmBot
     private void AdoptManualTarget(uint id)
     {
         if (id == 0 || id == _world.MyObjectId) return;
-        bool suits = Mode == FarmMode.Mining ? EntityTypes.IsMinable(id) : EntityTypes.IsShip(id);
+        bool suits = T.Mode == FarmMode.Mining ? EntityTypes.IsMinable(id) : EntityTypes.IsShip(id);
         if (!suits) return;
 
         lock (_gate)
@@ -575,7 +575,7 @@ public sealed partial class FarmBot
         Kills++;
         Log?.Invoke($"Target #{id:X8} destroyed (kill {Kills}).");
         _ = StopAllTogglesAsync();
-        if (AutoLoot) _ = TryLootAsync(id);
+        if (T.AutoLoot) _ = TryLootAsync(id);
     }
 
     private void OnCastResult(ushort slot, bool ok)
@@ -596,7 +596,7 @@ public sealed partial class FarmBot
 
     private void OnLootOffered(ushort lootId, IReadOnlyList<LootItem> items)
     {
-        if (!AutoLoot || items.Count == 0) return;
+        if (!T.AutoLoot || items.Count == 0) return;
         var ids = items.Select(i => i.ServerId).ToList();
         _ = _act.TakeLootItems(lootId, ids);
         LootTaken += ids.Count;

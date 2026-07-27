@@ -11,19 +11,6 @@ public sealed partial class FarmBot
 {
     // ------------------------------------------------------------------ fly to / follow
 
-    /// <summary>Where to stop, in units from a contact's centre, on a fly-to or follow run.</summary>
-    public float FollowDistance { get; set; } = 350f;
-
-    /// <summary>
-    /// Give up a one-shot <b>Go to</b> that has made no ground for this long.
-    ///
-    /// Only a Go to. A <b>Follow</b> never gives up, however far behind it falls: something that
-    /// is outrunning you now can turn, stop, dock or lose its boost a minute later, and a chase
-    /// that quits the moment the gap widens is a chase that never catches anything. It says it is
-    /// losing ground and keeps flying.
-    /// </summary>
-    public int FollowStallSeconds { get; set; } = 30;
-
     public bool IsFollowing => _following;
 
     /// <summary>True while the run is keeping station rather than just arriving.</summary>
@@ -95,15 +82,15 @@ public sealed partial class FarmBot
 
     /// <summary>
     /// Where to sit. No weapons are involved in a fly-to, so this is only about not flying into
-    /// the thing: <see cref="FollowDistance"/>, floored by the target's own size, because every
+    /// the thing: <see cref="BotTuning.FollowDistance"/>, floored by the target's own size, because every
     /// distance on the wire is centre-to-centre and a planetoid is not a point.
     /// </summary>
     private float FollowStandoff(SpaceObj target)
     {
         float clear = target.Radius > 0
-            ? target.Radius * RadiusClearance + MinimumStandoff
-            : MinimumStandoff;
-        return Math.Max(FollowDistance, clear);
+            ? target.Radius * T.RadiusClearance + T.MinimumStandoff
+            : T.MinimumStandoff;
+        return Math.Max(T.FollowDistance, clear);
     }
 
     private async Task FollowTick()
@@ -152,9 +139,9 @@ public sealed partial class FarmBot
 
         double stalled = (now - _followProgress).TotalSeconds;
 
-        if (!_followHold && stalled > FollowStallSeconds)
+        if (!_followHold && stalled > T.FollowStallSeconds)
         {
-            Log?.Invoke($"Gave up flying to {target} — no ground made in {FollowStallSeconds}s at "
+            Log?.Invoke($"Gave up flying to {target} — no ground made in {T.FollowStallSeconds}s at "
                       + $"{dist:F0}u. Use Follow if you want the bot to keep after it.");
             EndFollow($"Can't reach {target} — held at {dist:F0}u");
             await StopThrottleIfMoving();
@@ -162,7 +149,7 @@ public sealed partial class FarmBot
         }
 
         // Said once, not every tick, and only after it has clearly stopped being a blip.
-        if (_followHold && !gaining && stalled > FollowStallSeconds && !_followLosingGround)
+        if (_followHold && !gaining && stalled > T.FollowStallSeconds && !_followLosingGround)
         {
             _followLosingGround = true;
             Log?.Invoke($"{target} is outrunning you — still chasing at {dist:F0}u.");

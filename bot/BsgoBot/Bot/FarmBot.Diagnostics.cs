@@ -19,7 +19,7 @@ public sealed partial class FarmBot
             if (!EntityTypes.IsLootable(o.Id) || !o.HasPosition) continue;
             lock (_gate) { if (!_lootAsked.Add(o.Id)) continue; }
 
-            float reach = o.Radius > 0 ? Math.Max(o.Radius, 100f) : LootRange;
+            float reach = o.Radius > 0 ? Math.Max(o.Radius, 100f) : T.LootRange;
             float dist = _world.DistanceToMe(o) ?? float.MaxValue;
             if (dist > reach)
             {
@@ -66,26 +66,26 @@ public sealed partial class FarmBot
             : _world.MyCondition is { } bare ? $"{bare:F0} (no ship card yet)" : "unknown")}");
         lines.Add($"hangar         {(_hangarSince is { } inHangar
             ? $"out of sector for {(DateTime.UtcNow - inHangar).TotalSeconds:F0}s"
-              + (AutoUndock ? $", {_launchAsks} launch ask(s)" : ", auto undock OFF")
+              + (T.AutoUndock ? $", {_launchAsks} launch ask(s)" : ", auto undock OFF")
             : _world.Anchored
                 ? $"anchored to #{_world.AnchoredTo:X8} — riding, {_unanchorAsks} launch ask(s)"
                 : "flying")}");
         lines.Add($"deaths         {Deaths}, {RepairsBought} repair(s) bought");
 
-        string speedSource = TopSpeedOverride > 0f ? "set by hand"
+        string speedSource = T.TopSpeedOverride > 0f ? "set by hand"
                            : _world.ShipStat(ObjectStat.Speed) is > 0 ? "ship stat"
-                           : _observedTopSpeed > FallbackSpeed ? "watched your throttle"
+                           : _observedTopSpeed > T.FallbackSpeed ? "watched your throttle"
                            : "fallback, nothing published";
-        string boostSource = BoostSpeedOverride > 0f ? "set by hand"
+        string boostSource = T.BoostSpeedOverride > 0f ? "set by hand"
                            : _world.ShipStat(ObjectStat.BoostSpeed) is > 0 ? "ship stat"
                            : "never published";
         lines.Add($"throttle       {TopSpeed:F0}u/s ({speedSource})");
         lines.Add($"boost          " + (BoostSpeed > 0f
             ? $"{BoostSpeed:F0}u/s ({boostSource})"
-              + (UseBoost
-                    ? $", engaged past {BoostRunway(AsteroidStandoff):F0}u on a rock"
-                      + $" ({Math.Clamp(BoostSpeed * BrakingSeconds, MinBrakeDistance, BrakingDistance):F0}u to brake"
-                      + $" + {BoostSpeed * BoostShedSeconds:F0}u to shed it)"
+              + (T.UseBoost
+                    ? $", engaged past {BoostRunway(T.AsteroidStandoff):F0}u on a rock"
+                      + $" ({Math.Clamp(BoostSpeed * T.BrakingSeconds, T.MinBrakeDistance, T.BrakingDistance):F0}u to brake"
+                      + $" + {BoostSpeed * T.BoostShedSeconds:F0}u to shed it)"
                     : ", toggle is OFF")
             : $"unusable — no BoostSpeed ({boostSource}), so the gear is never engaged"));
         // The EFFECTIVE speed, not the stored throttle. In boost gear the throttle number does
@@ -106,18 +106,18 @@ public sealed partial class FarmBot
 
         var guns = Weapons.For(WeaponRole.Combat);
         var (mineGuns, improvised) = MiningWeapons();
-        lines.Add($"combat reach   {(guns.Count == 0 ? "no weapon known" : $"{EffectiveRange(guns):F0}u, sit at {PreferredRange(guns, CloseInFactor):F0}u + target size")}");
-        lines.Add($"hold off       asteroid {AsteroidStandoff:F0}u, planetoid {PlanetoidStandoff:F0}u");
+        lines.Add($"combat reach   {(guns.Count == 0 ? "no weapon known" : $"{EffectiveRange(guns):F0}u, sit at {PreferredRange(guns, T.CloseInFactor):F0}u + target size")}");
+        lines.Add($"hold off       asteroid {T.AsteroidStandoff:F0}u, planetoid {T.PlanetoidStandoff:F0}u");
 
-        if (AvoidCollisions)
+        if (T.AvoidCollisions)
         {
-            var ahead = BlockerAhead(_world.MyVelocity, TopSpeed * CollisionLookaheadSeconds,
+            var ahead = BlockerAhead(_world.MyVelocity, TopSpeed * T.CollisionLookaheadSeconds,
                                      CurrentTarget, DateTime.UtcNow, out float room);
-            lines.Add($"clearance      asteroid r×{AsteroidColliderFactor:F2} +{AsteroidCollisionMargin:F0}u, "
-                    + $"planetoid r×{PlanetoidClearanceFactor:F2} +{PlanetoidCollisionMargin:F0}u, "
+            lines.Add($"clearance      asteroid r×{AsteroidColliderFactor:F2} +{T.AsteroidCollisionMargin:F0}u, "
+                    + $"planetoid r×{T.PlanetoidClearanceFactor:F2} +{T.PlanetoidCollisionMargin:F0}u, "
                     + $"other r +{SafetyMargin:F0}u (hull {MyRadius:F0}u)");
-            lines.Add($"collisions     avoiding, radius +{CollisionMargin:F0}u, looking "
-                    + $"{TopSpeed * CollisionLookaheadSeconds:F0}u ahead — "
+            lines.Add($"collisions     avoiding, radius +{T.CollisionMargin:F0}u, looking "
+                    + $"{TopSpeed * T.CollisionLookaheadSeconds:F0}u ahead — "
                     + (_world.MyVelocity.LengthSquared() < 1f ? "not moving"
                        : ahead is null ? "path clear"
                        : $"{ahead} at {room:F0}u")
@@ -133,7 +133,7 @@ public sealed partial class FarmBot
         {
             var mineFire = MiningFireSet(mineGuns, improvised);
             lines.Add($"mining fires   {string.Join(", ", mineFire.Select(w => $"{w.Label} {w.Role}"))}"
-                    + (FireGunsWhileMining ? "" : "  (guns-on-rocks off)"));
+                    + (T.FireGunsWhileMining ? "" : "  (guns-on-rocks off)"));
         }
 
         var scanner = Scanner();
@@ -148,10 +148,10 @@ public sealed partial class FarmBot
             int confirmed = ConfirmedRocks(nowD);
             string gate = !ScannerAnswering
                 ? $"NOT ANSWERING — {_scansWithoutReply} casts with no reply, mining unfiltered"
-                : ScanOnlyWhenFiltering && !Filtering
+                : T.ScanOnlyWhenFiltering && !Filtering
                     ? "idle (no resource filter set)"
-                    : confirmed >= ScanQueueDepth
-                        ? $"idle (queue full — {confirmed} confirmed, wants {ScanQueueDepth})"
+                    : confirmed >= T.ScanQueueDepth
+                        ? $"idle (queue full — {confirmed} confirmed, wants {T.ScanQueueDepth})"
                         : CanAffordScan(scanner) ? "ready" : "waiting for power";
             string kind = scanner.Area switch
             {
@@ -160,7 +160,7 @@ public sealed partial class FarmBot
                 null => "area unknown — scan once by hand to settle it",
             };
             lines.Add($"scanner        ability #{scanner.AbilityId}, {kind}, reach "
-                    + $"{scanner.MaxRange ?? FallbackRange:F0}u, "
+                    + $"{scanner.MaxRange ?? T.FallbackRange:F0}u, "
                     + $"costs {scanner.PowerCost ?? 0f:F0} power — {gate}");
         }
         else
@@ -171,33 +171,33 @@ public sealed partial class FarmBot
         }
         lines.Add($"rock contents  {known} known, {unknown} unknown ({ScansSent} scans sent)");
         lines.Add($"mining queue   {ConfirmedRocks(nowD)} confirmed and worth mining, "
-                + $"stops scanning at {ScanQueueDepth}, scans trusted {ScanFreshnessSeconds}s");
+                + $"stops scanning at {T.ScanQueueDepth}, scans trusted {T.ScanFreshnessSeconds}s");
 
         AddMeterLines(lines, mineGuns, nowD);
 
         var repairs = Weapons.For(WeaponRole.Repair);
         lines.Add($"repair         {(repairs.Count == 0
             ? "none known — cast Damage Control once by hand to teach it"
-            : $"{string.Join(", ", repairs.Select(w => w.Label))} below {RepairAtHull:P0} hull"
+            : $"{string.Join(", ", repairs.Select(w => w.Label))} below {T.RepairAtHull:P0} hull"
               + $" ({RepairsCast} cast)")}"
-                + (UseRepairAbility ? "" : "  (off)"));
+                + (T.UseRepairAbility ? "" : "  (off)"));
 
         var stations = HostileStations();
         string nearestStation = stations
             .OrderBy(s => _world.DistanceToMe(s) ?? float.MaxValue)
             .Select(s => $"{s} at {_world.DistanceToMe(s) ?? 0f:F0}u")
             .FirstOrDefault() ?? "none located";
-        lines.Add($"enemy stations {(AvoidHostileStations
-            ? $"avoiding within {HostileStationKeepOut:F0}u — {nearestStation}"
+        lines.Add($"enemy stations {(T.AvoidHostileStations
+            ? $"avoiding within {T.HostileStationKeepOut:F0}u — {nearestStation}"
             : "not avoided (off)")}");
-        lines.Add($"firing         {(HoldFireUntilOptimal
+        lines.Add($"firing         {(T.HoldFireUntilOptimal
             ? "holds each weapon for its optimal range while closing"
             : "opens up at max range")}");
-        lines.Add($"hunting        {(Prey.Count == 0 ? "any NPC" : string.Join(", ", Prey))}"
-                + (AttackPlayers ? " + players" : ""));
+        lines.Add($"hunting        {(T.Prey.Count == 0 ? "any NPC" : string.Join(", ", T.Prey))}"
+                + (T.AttackPlayers ? " + players" : ""));
         lines.Add($"mining for     {(!Filtering
             ? "any resource"
-            : string.Join(" > ", WantedResources) + "   (best first)")}");
+            : string.Join(" > ", T.WantedResources) + "   (best first)")}");
 
         // What the server said is bolted to the ship, against what you told the bot it is.
         var slots = _world.MySlots();
@@ -212,7 +212,7 @@ public sealed partial class FarmBot
             var chased = _world.Get(_followTarget);
             lines.Add($"flying to      {chased?.ToString() ?? $"#{_followTarget:X8}"} at "
                     + $"{(chased is not null ? _world.DistanceToMe(chased) ?? 0f : 0f):F0}u, "
-                    + $"holding {(chased is not null ? FollowStandoff(chased) : FollowDistance):F0}u"
+                    + $"holding {(chased is not null ? FollowStandoff(chased) : T.FollowDistance):F0}u"
                     + (_followHold ? _followLosingGround ? " — losing ground, still chasing" : " — keeping station"
                                    : " — stops on arrival"));
         }
@@ -273,7 +273,7 @@ public sealed partial class FarmBot
         lines.Add("");
         foreach (var line in Cards.Describe()) lines.Add(line);
 
-        if (!FetchCatalogue) lines.Add("               (requests off — passive sniffing only)");
+        if (!T.FetchCatalogue) lines.Add("               (requests off — passive sniffing only)");
 
         // Only hostiles, and only ones we can actually see: the point is the fight in front of
         // us, not a dump of everything ever cached.

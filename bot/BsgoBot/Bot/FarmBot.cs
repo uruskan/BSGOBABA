@@ -166,7 +166,7 @@ public sealed partial class FarmBot
     /// scanner for it tore the resource filter down every time the bot parked at a ghost.
     /// </summary>
     private bool ScannerAnswering =>
-        _scansWithoutReply < ScanFailuresBeforeUnfiltered || _unansweredRocks.Count < 2;
+        _scansWithoutReply < T.ScanFailuresBeforeUnfiltered || _unansweredRocks.Count < 2;
 
     // ---- docking ---------------------------------------------------------------------
     private uint _dockTarget;
@@ -230,6 +230,15 @@ public sealed partial class FarmBot
     /// requests is you parking the ship, not the bot losing it — and the bot must not undo it.</summary>
     private DateTime _youDockedAt = DateTime.MinValue;
 
+    /// <summary>
+    /// Every tunable number and switch, in one swappable object. See <see cref="BotTuning"/>.
+    ///
+    /// Named for how often it is read rather than what it holds: nearly every decision in the
+    /// farm loop consults it, and <c>T.RetreatHull</c> stays out of the way of the code around
+    /// it in a manner that <c>Tuning.RetreatHull</c> does not.
+    /// </summary>
+    public BotTuning T { get; set; } = new();
+
     public WeaponBook Weapons { get; } = new();
 
     /// <summary>
@@ -251,13 +260,7 @@ public sealed partial class FarmBot
     /// </summary>
     public CombatLog Fights { get; } = new();
 
-    /// <summary>Turns off the injected card requests, leaving passive sniffing alone. The
-    /// requests are ordinary client traffic, but they are still traffic we invented.</summary>
-    public bool FetchCatalogue { get; set; }
-
     public bool Enabled { get; private set; }
-    public FarmMode Mode { get; set; } = FarmMode.Combat;
-
     // ---- counters -----------------------------------------------------------------
     public int Kills { get; private set; }
     public int ShotsFired { get; private set; }
@@ -362,7 +365,7 @@ public sealed partial class FarmBot
             // exactly when you are flying yourself.
             Fights.Tick();
 
-            if (FetchCatalogue && _proxy.ClientConnected)
+            if (T.FetchCatalogue && _proxy.ClientConnected)
                 Cards.DrainAsync(_act.RequestCards).GetAwaiter().GetResult();
 
             if ((DateTime.UtcNow - _lastCardSave).TotalSeconds > 30)
@@ -530,7 +533,7 @@ public sealed partial class FarmBot
         if (_throttleOpen || _world.MyVelocity.LengthSquared() > 1f)
             _movedAt = DateTime.UtcNow;
 
-        // Compare ratios with ratios. MyHull is in points, so the old `MyHull < RetreatHull`
+        // Compare ratios with ratios. MyHull is in points, so the old `MyHull < T.RetreatHull`
         // asked whether 495 was below 0.25 — it never was, and the retreat threshold did nothing.
         // A dock run owns the ship while it lasts — no targeting, no firing, no retreat logic.
         if (_docking)
@@ -543,9 +546,9 @@ public sealed partial class FarmBot
         // difference between fighting on and running.
         await SelfRepairAsync();
 
-        if (_world.MyHullFraction is { } hull && hull < RetreatHull)
+        if (_world.MyHullFraction is { } hull && hull < T.RetreatHull)
         {
-            if (FleeWhenHurt) { await FleeTick(hull); return; }
+            if (T.FleeWhenHurt) { await FleeTick(hull); return; }
             await DisengageAsync($"hull at {hull:P0}");
             Status = $"HULL {hull:P0} — disengaged. Raise the retreat threshold to keep going.";
             return;
@@ -571,13 +574,13 @@ public sealed partial class FarmBot
             return;
         }
 
-        if (AutoLoot) await SweepLootAsync();
+        if (T.AutoLoot) await SweepLootAsync();
 
-        if (Mode == FarmMode.Mining)
+        if (T.Mode == FarmMode.Mining)
         {
             // Mining is what we're here for, but not while something is shooting. The guns are
             // already fitted; the bot simply wasn't looking up from the rock.
-            if (DefendSelf && NearestThreat() is not null)
+            if (T.DefendSelf && NearestThreat() is not null)
             {
                 await CombatTick(IsThreat, "Defending");
                 return;

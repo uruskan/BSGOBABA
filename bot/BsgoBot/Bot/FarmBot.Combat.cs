@@ -48,7 +48,7 @@ public sealed partial class FarmBot
 
         if (dist > range)
         {
-            if (AutoApproach)
+            if (T.AutoApproach)
             {
                 await SteerToward(target, preferred);
                 Status = $"Closing on {target} — {dist:F0}u, want {preferred:F0}u"
@@ -64,7 +64,7 @@ public sealed partial class FarmBot
 
         // In reach — but keep flying in until we're inside the accurate band. Opening fire at
         // the edge of max range and stopping there is how a viper misses every shot.
-        bool closing = AutoApproach && dist > preferred;
+        bool closing = T.AutoApproach && dist > preferred;
         if (closing) await SteerToward(target, preferred);
         else await StopThrottleIfMoving();
 
@@ -81,7 +81,7 @@ public sealed partial class FarmBot
     /// <summary>
     /// Something worth pointing guns at right now, regardless of what we were doing. Anything
     /// that has locked us is a threat at any distance — it is already shooting. Anything else
-    /// has to be inside <see cref="ThreatRange"/> to count.
+    /// has to be inside <see cref="BotTuning.ThreatRange"/> to count.
     /// </summary>
     private bool IsThreat(SpaceObj o)
     {
@@ -94,7 +94,7 @@ public sealed partial class FarmBot
 
         if (o.TargetId == _world.MyObjectId) return true;
         if (!EntityTypes.IsNpcCombatant(o.Id) && !IsHomingHazard(o)) return false;
-        return (_world.DistanceToMe(o) ?? float.MaxValue) <= ThreatRange;
+        return (_world.DistanceToMe(o) ?? float.MaxValue) <= T.ThreatRange;
     }
 
     /// <summary>
@@ -107,7 +107,7 @@ public sealed partial class FarmBot
         if (!IsHostile(o)) return false;
         if (o.TargetId == _world.MyObjectId) return true;
         if (!EntityTypes.IsNpcCombatant(o.Id) && !IsHomingHazard(o)) return false;
-        return (_world.DistanceToMe(o) ?? float.MaxValue) <= ThreatRange;
+        return (_world.DistanceToMe(o) ?? float.MaxValue) <= T.ThreatRange;
     }
 
     /// <summary>
@@ -140,12 +140,12 @@ public sealed partial class FarmBot
         // IsShip includes outposts and weapon platforms. Ticking "attack players" therefore used
         // to sign the ship up to solo an enemy station, which is a death sentence rather than a
         // fight — unless they're in the prey list, in which case you asked for it.
-        bool shape = AttackPlayers ? EntityTypes.IsShip(o.Id) : EntityTypes.IsNpcCombatant(o.Id);
+        bool shape = T.AttackPlayers ? EntityTypes.IsShip(o.Id) : EntityTypes.IsNpcCombatant(o.Id);
         if (!shape) return false;
-        if (IsEmplacement(o) && !Prey.Contains(o.Type)) return false;
+        if (IsEmplacement(o) && !T.Prey.Contains(o.Type)) return false;
 
-        // An explicit prey list wins, except that players are governed by AttackPlayers alone.
-        if (Prey.Count > 0 && o.Type != SpaceEntityType.Player && !Prey.Contains(o.Type)) return false;
+        // An explicit prey list wins, except that players are governed by T.AttackPlayers alone.
+        if (T.Prey.Count > 0 && o.Type != SpaceEntityType.Player && !T.Prey.Contains(o.Type)) return false;
 
         // Nothing inside a station's envelope is worth it: killing the NPC there means taking the
         // station's fire for the whole fight.
@@ -155,20 +155,6 @@ public sealed partial class FarmBot
 
         return _world.RelationTo(o.Id) is Relation.Enemy or Relation.Neutral;
     }
-
-    /// <summary>
-    /// Restrict hunting, locking and firing to contacts inside your own detection radii.
-    ///
-    /// <b>Off</b>, which is how the bot has always behaved: WhoIs reports objects far beyond
-    /// every detection ring, so the bot happily engages things the client draws nothing for.
-    /// That was suspected of causing the combat disconnects and turned on — but the theory was
-    /// never actually tested, because the run that failed next was still the previous build. So
-    /// it goes back to off rather than staying on unearned.
-    ///
-    /// Worth revisiting on its own merits: engaging a contact 9,000u away with a 1,500u DRADIS
-    /// is a long flight to something that may not be there by the time we arrive.
-    /// </summary>
-    public bool HuntOnlyVisible { get; set; }
 
     // ------------------------------------------------------------------ hostile emplacements
 
@@ -204,7 +190,7 @@ public sealed partial class FarmBot
     /// </summary>
     private List<SpaceObj> HostileStations()
     {
-        if (!AvoidHostileStations) return [];
+        if (!T.AvoidHostileStations) return [];
 
         var now = DateTime.UtcNow;
         lock (_stationGate)
@@ -228,9 +214,9 @@ public sealed partial class FarmBot
     /// <summary>True if this object sits inside the reach of an enemy emplacement.</summary>
     private bool InStationDanger(SpaceObj o)
     {
-        if (!AvoidHostileStations || !o.HasPosition) return false;
+        if (!T.AvoidHostileStations || !o.HasPosition) return false;
         foreach (var s in HostileStations())
-            if (Vector3.Distance(s.Position, o.Position) <= HostileStationKeepOut) return true;
+            if (Vector3.Distance(s.Position, o.Position) <= T.HostileStationKeepOut) return true;
         return false;
     }
 
@@ -239,7 +225,7 @@ public sealed partial class FarmBot
     {
         if (!_world.MyPositionKnown) return null;
         return HostileStations()
-            .Where(s => (_world.DistanceToMe(s) ?? float.MaxValue) <= HostileStationKeepOut)
+            .Where(s => (_world.DistanceToMe(s) ?? float.MaxValue) <= T.HostileStationKeepOut)
             .OrderBy(s => _world.DistanceToMe(s) ?? float.MaxValue)
             .FirstOrDefault();
     }
@@ -258,7 +244,7 @@ public sealed partial class FarmBot
 
         await RunInDirection(_world.MyPosition - station.PredictedPosition(now), now);
 
-        Status = $"Backing out of {station} — {dist:F0}u, want {HostileStationKeepOut:F0}u";
+        Status = $"Backing out of {station} — {dist:F0}u, want {T.HostileStationKeepOut:F0}u";
     }
 
 }

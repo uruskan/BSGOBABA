@@ -1,15 +1,27 @@
-using System.Numerics;
-using BsgoBot.Cards;
-using BsgoBot.Net;
 using BsgoBot.Protocol;
-using BsgoBot.Proxy;
 using BsgoBot.World;
 
 namespace BsgoBot.Bot;
 
-public sealed partial class FarmBot
+/// <summary>
+/// Everything you can tune about how the farm loop behaves, in one object.
+///
+/// Split out of <see cref="FarmBot"/> because it was 77 properties living on the same class
+/// that flies the ship, each of which had to be hand-copied out of <see cref="BotSettings"/>
+/// one line at a time.
+///
+/// <para>It is one object so it can be <b>swapped</b>. A Raptor and a Vanir disagree about
+/// nearly every number in here — standoffs, braking, threat range, scan reserve — so a ship
+/// change is meant to be an assignment to <see cref="FarmBot.T"/>, not 77 of them.</para>
+/// </summary>
+public sealed class BotTuning
 {
-    // ---- tuning -------------------------------------------------------------------
+    /// <summary>Turns off the injected card requests, leaving passive sniffing alone. The
+    /// requests are ordinary client traffic, but they are still traffic we invented.</summary>
+    public bool FetchCatalogue { get; set; }
+
+    public FarmMode Mode { get; set; } = FarmMode.Combat;
+
     /// <summary>
     /// Last-resort reach, for a server that publishes neither slot stats nor a catalogue.
     ///
@@ -166,22 +178,6 @@ public sealed partial class FarmBot
     /// higher-ranked respawns, because the damage already put into it would be thrown away.
     /// </summary>
     public List<ResourceType> WantedResources { get; } = [];
-
-    /// <summary>
-    /// True when a resource filter is actually narrowing anything.
-    ///
-    /// Ticking every minable resource is not a filter — it is the default written out longhand.
-    /// Counting it as one was not harmless: the hold-fire rule in <see cref="MineAsync"/> parks
-    /// the guns until a rock is identified, which buys nothing at all when every possible answer
-    /// is one we accept. It only decided the order to fly to rocks in, and paid for that with a
-    /// scan-shaped stall on every unscanned rock.
-    /// </summary>
-    private bool Filtering =>
-        WantedResources.Count > 0 && !Array.TrueForAll(Resources.Minable, WantedResources.Contains);
-
-    /// <summary>Whether a scanned rock holds something we asked for.</summary>
-    private bool WantsResource(uint guid) =>
-        !Filtering || WantedResources.Contains((ResourceType)guid);
 
     /// <summary>Also order a mining ship to the asteroid (costs resources) as well as
     /// firing your own mining laser.</summary>
@@ -435,5 +431,127 @@ public sealed partial class FarmBot
     /// <summary>Spacing between scanner-identification probes, so a ship full of utility
     /// slots doesn't fire all of them in one tick.</summary>
     public int ProbeIntervalSeconds { get; set; } = 3;
+
+    /// <summary>Where to stop, in units from a contact's centre, on a fly-to or follow run.</summary>
+    public float FollowDistance { get; set; } = 350f;
+
+    /// <summary>
+    /// Give up a one-shot <b>Go to</b> that has made no ground for this long.
+    ///
+    /// Only a Go to. A <b>Follow</b> never gives up, however far behind it falls: something that
+    /// is outrunning you now can turn, stop, dock or lose its boost a minute later, and a chase
+    /// that quits the moment the gap widens is a chase that never catches anything. It says it is
+    /// losing ground and keeps flying.
+    /// </summary>
+    public int FollowStallSeconds { get; set; } = 30;
+
+    /// <summary>
+    /// Whether the bot may send a dock request at all.
+    ///
+    /// On, now that the sequence is right. It was briefly off for good reason: three dock
+    /// requests had ever been sent — 02:18:54, 02:34:54 and 13:37:15 on 27 Jul — and the server
+    /// hung up 78ms, 364ms and 80ms later, with no case of one working.
+    ///
+    /// Neither the message nor the range was ever the problem. A real dock captured off the wire
+    /// is <c>022D000100004A00000000</c>, which is byte-for-byte what the bot sent, and the same
+    /// outpost accepted a manual dock from 791u while the bot was asking from 248u. What was
+    /// missing was the LockTarget in front of it — see <see cref="LockBeforeDockAsync"/>.
+    ///
+    /// Kept as a switch because it is the one action with a proven history of ending sessions.
+    /// Turning it off costs nothing but the last step: the retreat still runs to the outpost and
+    /// shelters under its guns, which is the part that saves the ship.
+    /// </summary>
+    public bool AllowDocking { get; set; } = true;
+
+    /// <summary>How close to get before asking to dock, when nothing has been learned yet.</summary>
+    public float DockApproach { get; set; } = 250f;
+
+    /// <summary>Give up on a dock run after this long.</summary>
+    public int DockTimeoutSeconds { get; set; } = 90;
+
+    /// <summary>
+    /// The shortest time we will spend at a refuge before its hull trend is allowed to send us
+    /// away. Hysteresis, not a deadline: one burst of damage on arrival must not abandon an
+    /// outpost that is about to let us in.
+    /// </summary>
+    public float DockGiveUpSeconds { get; set; } = 10f;
+
+    /// <summary>
+    /// How much hull we will lose at a refuge before deciding it is not sheltering us.
+    ///
+    /// This replaced a flat 10s timeout, which was wrong in exactly the case it was written for:
+    /// a dock cooldown after combat can run to tens of seconds, and a short timer abandons a good
+    /// outpost while its countdown is still ticking. Whether the shelter is working is a thing we
+    /// can measure — 0.10 is ten points of hull lost since the best reading since arriving.
+    /// </summary>
+    public float RefugeBleedFraction { get; set; } = 0.10f;
+
+    /// <summary>
+    /// Get the ship back out of the hangar by itself: answer the death screen, buy the hull
+    /// condition back, launch, and carry on farming.
+    ///
+    /// Off means a death ends the session in every practical sense — the farm loop keeps ticking
+    /// against a ship that is not in the sector and does nothing at all until someone presses
+    /// Undock.
+    /// </summary>
+    public bool AutoUndock { get; set; } = true;
+
+    /// <summary>Buy the ship's condition back before launching, with titanium. Dying always costs
+    /// condition, and a wrecked hull launches with a fraction of its stats.</summary>
+    public bool AutoRepair { get; set; } = true;
+
+    /// <summary>
+    /// How long to sit in the hangar before launching.
+    ///
+    /// Not politeness: the client has its own death sequence to play out, the repair has to be
+    /// asked for and answered, and the server will not launch a ship it still thinks is dead. Six
+    /// seconds is enough for all three without making a death cost a minute of farming.
+    /// </summary>
+    public int UndockDelaySeconds { get; set; } = 6;
+
+    /// <summary>How long to wait before asking to launch again when the first ask changed nothing.</summary>
+    public int RelaunchIntervalSeconds { get; set; } = 15;
+
+    /// <summary>Wait this long after anchoring before asking to launch, so a carrier you boarded
+    /// on purpose is not immediately thrown off it.</summary>
+    public int UnanchorDelaySeconds { get; set; } = 4;
+
+    /// <summary>
+    /// Restrict hunting, locking and firing to contacts inside your own detection radii.
+    ///
+    /// <b>Off</b>, which is how the bot has always behaved: WhoIs reports objects far beyond
+    /// every detection ring, so the bot happily engages things the client draws nothing for.
+    /// That was suspected of causing the combat disconnects and turned on — but the theory was
+    /// never actually tested, because the run that failed next was still the previous build. So
+    /// it goes back to off rather than staying on unearned.
+    ///
+    /// Worth revisiting on its own merits: engaging a contact 9,000u away with a 1,500u DRADIS
+    /// is a long flight to something that may not be there by the time we arrive.
+    /// </summary>
+    public bool HuntOnlyVisible { get; set; }
+
+    /// <summary>
+    /// How far to scan when nothing has published the scanner's reach.
+    ///
+    /// Deliberately short. The server checks the scan against the ability's own
+    /// <c>ObjectStat.MaxRange</c> and simply skips targets beyond it without a word
+    /// (bsgocore <c>ResourceScanAction.internalProcess</c>), so overstating the reach produces
+    /// silent nothing — which is exactly what a 3,000u guess did.
+    /// </summary>
+    public float ScanReachFallback { get; set; } = 600f;
+
+    /// <summary>
+    /// Ask the server to stream the target's hull and power.
+    ///
+    /// Was briefly disabled on the theory that it caused the combat disconnects, being the one
+    /// message combat sends and mining does not. A session that sent none of them and dropped
+    /// anyway settled that: it is innocent, so it is back on. It supplies the target's hull
+    /// readout and <c>TargetId</c>, which is how the bot knows something has locked us.
+    /// </summary>
+    public bool SubscribeToTarget { get; set; } = true;
+
+    /// <summary>How far past an obstacle's clearance to get before we stop calling ourselves
+    /// inside it. Pure hysteresis: it exists so leaving is a decision, not a boundary case.</summary>
+    public float EscapeClearance { get; set; } = 1.25f;
 
 }

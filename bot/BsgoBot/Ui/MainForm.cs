@@ -247,54 +247,54 @@ public sealed class MainForm : Form
     private void ApplySettingsToBot()
     {
         var b = _cfg.Bot;
-        _bot.FallbackRange = b.FallbackRange;
-        _bot.FallbackFireIntervalMs = b.FallbackFireIntervalMs;
-        _bot.AutoApproach = b.AutoApproach;
-        _bot.UseBoost = b.UseBoost;
-        _bot.BoostShedSeconds = b.BoostShedSeconds;
-        _bot.FallbackSpeed = b.FallbackSpeed;
-        _bot.TopSpeedOverride = b.TopSpeedOverride;
-        _bot.BoostSpeedOverride = b.BoostSpeedOverride;
-        _bot.AvoidCollisions = b.AvoidCollisions;
-        _bot.CollisionMargin = b.CollisionMargin;
-        _bot.RockTravelPenalty = b.RockTravelPenalty;
-        _bot.FetchCatalogue = b.FetchCatalogue;
-        _bot.AsteroidStandoff = b.AsteroidStandoff;
-        _bot.PlanetoidStandoff = b.PlanetoidStandoff;
-        _bot.FollowDistance = b.FollowDistance;
-        _bot.AutoLoot = b.AutoLoot;
-        _bot.LootRange = b.LootRange;
-        _bot.RetreatHull = b.RetreatHull;
-        _bot.AttackPlayers = b.AttackPlayers;
-        _bot.UseMiningFacility = b.UseMiningFacility;
-        _bot.FireGunsWhileMining = b.FireGunsWhileMining;
-        _bot.ScanQueueDepth = b.ScanQueueDepth;
-        _bot.ScanFreshnessSeconds = b.ScanFreshnessSeconds;
-        _bot.AllowDocking = b.AllowDocking;
-        _bot.DockGiveUpSeconds = b.DockGiveUpSeconds;
-        _bot.RefugeBleedFraction = b.RefugeBleedFraction;
-        _bot.AsteroidCollisionMargin = b.AsteroidCollisionMargin;
-        _bot.PlanetoidCollisionMargin = b.PlanetoidCollisionMargin;
-        _bot.PlanetoidClearanceFactor = b.PlanetoidClearanceFactor;
-        _bot.SelfPositionTrustSeconds = b.SelfPositionTrustSeconds;
-        _bot.SelfPositionWaitSeconds = b.SelfPositionWaitSeconds;
-        _bot.FleeToOutpost = b.FleeToOutpost;
-        _bot.UseRepairAbility = b.UseRepairAbility;
-        _bot.RepairAtHull = b.RepairAtHull;
-        _bot.AutoUndock = b.AutoUndock;
-        _bot.AutoRepair = b.AutoRepairShip;
-        _bot.UndockDelaySeconds = b.UndockDelaySeconds;
-        _bot.RelaunchIntervalSeconds = b.RelaunchIntervalSeconds;
-        _bot.AvoidHostileStations = b.AvoidHostileStations;
-        _bot.HostileStationKeepOut = b.HostileStationKeepOut;
-        _bot.HoldFireUntilOptimal = b.HoldFireUntilOptimal;
-        _bot.DefendSelf = b.DefendSelf;
-        _bot.ThreatRange = b.ThreatRange;
-        _bot.FleeWhenHurt = b.FleeWhenHurt;
+        _bot.T.FallbackRange = b.FallbackRange;
+        _bot.T.FallbackFireIntervalMs = b.FallbackFireIntervalMs;
+        _bot.T.AutoApproach = b.AutoApproach;
+        _bot.T.UseBoost = b.UseBoost;
+        _bot.T.BoostShedSeconds = b.BoostShedSeconds;
+        _bot.T.FallbackSpeed = b.FallbackSpeed;
+        _bot.T.TopSpeedOverride = b.TopSpeedOverride;
+        _bot.T.BoostSpeedOverride = b.BoostSpeedOverride;
+        _bot.T.AvoidCollisions = b.AvoidCollisions;
+        _bot.T.CollisionMargin = b.CollisionMargin;
+        _bot.T.RockTravelPenalty = b.RockTravelPenalty;
+        _bot.T.FetchCatalogue = b.FetchCatalogue;
+        _bot.T.AsteroidStandoff = b.AsteroidStandoff;
+        _bot.T.PlanetoidStandoff = b.PlanetoidStandoff;
+        _bot.T.FollowDistance = b.FollowDistance;
+        _bot.T.AutoLoot = b.AutoLoot;
+        _bot.T.LootRange = b.LootRange;
+        _bot.T.RetreatHull = b.RetreatHull;
+        _bot.T.AttackPlayers = b.AttackPlayers;
+        _bot.T.UseMiningFacility = b.UseMiningFacility;
+        _bot.T.FireGunsWhileMining = b.FireGunsWhileMining;
+        _bot.T.ScanQueueDepth = b.ScanQueueDepth;
+        _bot.T.ScanFreshnessSeconds = b.ScanFreshnessSeconds;
+        _bot.T.AllowDocking = b.AllowDocking;
+        _bot.T.DockGiveUpSeconds = b.DockGiveUpSeconds;
+        _bot.T.RefugeBleedFraction = b.RefugeBleedFraction;
+        _bot.T.AsteroidCollisionMargin = b.AsteroidCollisionMargin;
+        _bot.T.PlanetoidCollisionMargin = b.PlanetoidCollisionMargin;
+        _bot.T.PlanetoidClearanceFactor = b.PlanetoidClearanceFactor;
+        _bot.T.SelfPositionTrustSeconds = b.SelfPositionTrustSeconds;
+        _bot.T.SelfPositionWaitSeconds = b.SelfPositionWaitSeconds;
+        _bot.T.FleeToOutpost = b.FleeToOutpost;
+        _bot.T.UseRepairAbility = b.UseRepairAbility;
+        _bot.T.RepairAtHull = b.RepairAtHull;
+        _bot.T.AutoUndock = b.AutoUndock;
+        _bot.T.AutoRepair = b.AutoRepairShip;
+        _bot.T.UndockDelaySeconds = b.UndockDelaySeconds;
+        _bot.T.RelaunchIntervalSeconds = b.RelaunchIntervalSeconds;
+        _bot.T.AvoidHostileStations = b.AvoidHostileStations;
+        _bot.T.HostileStationKeepOut = b.HostileStationKeepOut;
+        _bot.T.HoldFireUntilOptimal = b.HoldFireUntilOptimal;
+        _bot.T.DefendSelf = b.DefendSelf;
+        _bot.T.ThreatRange = b.ThreatRange;
+        _bot.T.FleeWhenHurt = b.FleeWhenHurt;
 
-        _bot.Prey.Clear();
+        _bot.T.Prey.Clear();
         foreach (var name in b.Prey)
-            if (Enum.TryParse<SpaceEntityType>(name, out var t)) _bot.Prey.Add(t);
+            if (Enum.TryParse<SpaceEntityType>(name, out var t)) _bot.T.Prey.Add(t);
 
         // Migration: an existing bot.json only ever held one resource. Promote it to a one-entry
         // priority list the first time, so the setting the user picked keeps meaning what it did.
@@ -308,12 +308,12 @@ public sealed class MainForm : Form
         // Filtered against what a rock can actually hold: an earlier build offered cubits,
         // uranium and plutonium, so a saved list can still rank things that will never match.
         // Left in place they would occupy priority slots above resources that do exist.
-        _bot.WantedResources.Clear();
+        _bot.T.WantedResources.Clear();
         foreach (var name in b.WantedResources)
             if (Enum.TryParse<ResourceType>(name, out var r) && Resources.IsMinable(r))
-                _bot.WantedResources.Add(r);
+                _bot.T.WantedResources.Add(r);
 
-        b.WantedResources = _bot.WantedResources.Select(r => r.ToString()).ToList();
+        b.WantedResources = _bot.T.WantedResources.Select(r => r.ToString()).ToList();
     }
 
     /// <summary>
@@ -322,7 +322,7 @@ public sealed class MainForm : Form
     /// </summary>
     private void ApplyResources()
     {
-        _cfg.Bot.WantedResources = _bot.WantedResources.Select(r => r.ToString()).ToList();
+        _cfg.Bot.WantedResources = _bot.T.WantedResources.Select(r => r.ToString()).ToList();
         foreach (var chip in _resourceChips) RankChip(chip);
     }
 
@@ -331,16 +331,16 @@ public sealed class MainForm : Form
     private void RankChip(ToggleChip chip)
     {
         if (chip.Tag2 is not ResourceType r) return;
-        int rank = _bot.WantedResources.IndexOf(r);
+        int rank = _bot.T.WantedResources.IndexOf(r);
         chip.Text = rank >= 0 ? $"{rank + 1}. {r}" : r.ToString();
     }
 
     private void ApplyPrey()
     {
-        _bot.Prey.Clear();
+        _bot.T.Prey.Clear();
         foreach (var chip in _preyChips)
-            if (chip.Checked && chip.Tag2 is SpaceEntityType t) _bot.Prey.Add(t);
-        _cfg.Bot.Prey = _bot.Prey.Select(t => t.ToString()).ToList();
+            if (chip.Checked && chip.Tag2 is SpaceEntityType t) _bot.T.Prey.Add(t);
+        _cfg.Bot.Prey = _bot.T.Prey.Select(t => t.ToString()).ToList();
     }
 
     // ---------------------------------------------------------------- layout
@@ -493,72 +493,72 @@ public sealed class MainForm : Form
         _chipMining.Tint = Theme.Warn;
         _chipCombat.CheckedChanged += (_, _) => SetMode(FarmMode.Combat);
         _chipMining.CheckedChanged += (_, _) => SetMode(FarmMode.Mining);
-        _chipCombat.Checked = _bot.Mode == FarmMode.Combat;
-        _chipMining.Checked = _bot.Mode == FarmMode.Mining;
+        _chipCombat.Checked = _bot.T.Mode == FarmMode.Combat;
+        _chipMining.Checked = _bot.T.Mode == FarmMode.Mining;
 
         _chipApproach.Checked = _cfg.Bot.AutoApproach;
         _chipApproach.CheckedChanged += (_, _) =>
-            _bot.AutoApproach = _cfg.Bot.AutoApproach = _chipApproach.Checked;
+            _bot.T.AutoApproach = _cfg.Bot.AutoApproach = _chipApproach.Checked;
 
         _chipBoost.Tint = Theme.Warn;
         _chipBoost.Checked = _cfg.Bot.UseBoost;
         _chipBoost.CheckedChanged += (_, _) =>
-            _bot.UseBoost = _cfg.Bot.UseBoost = _chipBoost.Checked;
+            _bot.T.UseBoost = _cfg.Bot.UseBoost = _chipBoost.Checked;
 
         _chipLoot.Checked = _cfg.Bot.AutoLoot;
         _chipLoot.CheckedChanged += (_, _) =>
-            _bot.AutoLoot = _cfg.Bot.AutoLoot = _chipLoot.Checked;
+            _bot.T.AutoLoot = _cfg.Bot.AutoLoot = _chipLoot.Checked;
 
         _chipPlayers.Tint = Theme.Bad;
         _chipPlayers.Checked = _cfg.Bot.AttackPlayers;
         _chipPlayers.CheckedChanged += (_, _) =>
-            _bot.AttackPlayers = _cfg.Bot.AttackPlayers = _chipPlayers.Checked;
+            _bot.T.AttackPlayers = _cfg.Bot.AttackPlayers = _chipPlayers.Checked;
 
         _chipGunsOnRocks.Tint = Theme.Warn;
         _chipGunsOnRocks.Checked = _cfg.Bot.FireGunsWhileMining;
         _chipGunsOnRocks.CheckedChanged += (_, _) =>
-            _bot.FireGunsWhileMining = _cfg.Bot.FireGunsWhileMining = _chipGunsOnRocks.Checked;
+            _bot.T.FireGunsWhileMining = _cfg.Bot.FireGunsWhileMining = _chipGunsOnRocks.Checked;
 
         _chipDefend.Tint = Theme.Bad;
         _chipDefend.Checked = _cfg.Bot.DefendSelf;
         _chipDefend.CheckedChanged += (_, _) =>
-            _bot.DefendSelf = _cfg.Bot.DefendSelf = _chipDefend.Checked;
+            _bot.T.DefendSelf = _cfg.Bot.DefendSelf = _chipDefend.Checked;
 
         _chipOptimal.Checked = _cfg.Bot.HoldFireUntilOptimal;
         _chipOptimal.CheckedChanged += (_, _) =>
-            _bot.HoldFireUntilOptimal = _cfg.Bot.HoldFireUntilOptimal = _chipOptimal.Checked;
+            _bot.T.HoldFireUntilOptimal = _cfg.Bot.HoldFireUntilOptimal = _chipOptimal.Checked;
 
         _chipAvoidStations.Tint = Theme.Bad;
         _chipAvoidStations.Checked = _cfg.Bot.AvoidHostileStations;
         _chipAvoidStations.CheckedChanged += (_, _) =>
-            _bot.AvoidHostileStations = _cfg.Bot.AvoidHostileStations = _chipAvoidStations.Checked;
+            _bot.T.AvoidHostileStations = _cfg.Bot.AvoidHostileStations = _chipAvoidStations.Checked;
 
         _chipRepair.Checked = _cfg.Bot.UseRepairAbility;
         _chipRepair.CheckedChanged += (_, _) =>
-            _bot.UseRepairAbility = _cfg.Bot.UseRepairAbility = _chipRepair.Checked;
+            _bot.T.UseRepairAbility = _cfg.Bot.UseRepairAbility = _chipRepair.Checked;
 
         // What happens after a death: launch again, and pay to patch the hull before doing it.
         _chipAutoUndock.Checked = _cfg.Bot.AutoUndock;
         _chipAutoUndock.CheckedChanged += (_, _) =>
-            _bot.AutoUndock = _cfg.Bot.AutoUndock = _chipAutoUndock.Checked;
+            _bot.T.AutoUndock = _cfg.Bot.AutoUndock = _chipAutoUndock.Checked;
 
         // Warn-tinted: it is the one switch that spends a resource on its own.
         _chipHangarRepair.Tint = Theme.Warn;
         _chipHangarRepair.Checked = _cfg.Bot.AutoRepairShip;
         _chipHangarRepair.CheckedChanged += (_, _) =>
-            _bot.AutoRepair = _cfg.Bot.AutoRepairShip = _chipHangarRepair.Checked;
+            _bot.T.AutoRepair = _cfg.Bot.AutoRepairShip = _chipHangarRepair.Checked;
 
         _chipAvoidRocks.Tint = Theme.Bad;
         _chipAvoidRocks.Checked = _cfg.Bot.AvoidCollisions;
         _chipAvoidRocks.CheckedChanged += (_, _) =>
-            _bot.AvoidCollisions = _cfg.Bot.AvoidCollisions = _chipAvoidRocks.Checked;
+            _bot.T.AvoidCollisions = _cfg.Bot.AvoidCollisions = _chipAvoidRocks.Checked;
 
         // Warn-tinted: this is the one switch that puts traffic on the wire the real client never
         // sent, so it is the one to turn off first if the session starts dropping.
         _chipCatalogue.Tint = Theme.Warn;
         _chipCatalogue.Checked = _cfg.Bot.FetchCatalogue;
         _chipCatalogue.CheckedChanged += (_, _) =>
-            _bot.FetchCatalogue = _cfg.Bot.FetchCatalogue = _chipCatalogue.Checked;
+            _bot.T.FetchCatalogue = _cfg.Bot.FetchCatalogue = _chipCatalogue.Checked;
 
         // A break after the mode pair keeps "what am I doing" visually apart from "how".
         var brk = new Panel { Width = 10_000, Height = 1, BackColor = Theme.Card, Margin = new Padding(0, 3, 0, 5) };
@@ -598,15 +598,15 @@ public sealed class MainForm : Form
         // Only what a rock can actually hold. Absence of any pick is what "Any" used to mean.
         foreach (var rt in Resources.Minable)
         {
-            var chip = new ToggleChip(rt.ToString(), _bot.WantedResources.Contains(rt))
+            var chip = new ToggleChip(rt.ToString(), _bot.T.WantedResources.Contains(rt))
             {
                 Tag2 = rt,
                 Margin = new Padding(0, 0, 4, 4),
             };
             chip.CheckedChanged += (_, _) =>
             {
-                if (chip.Checked) { if (!_bot.WantedResources.Contains(rt)) _bot.WantedResources.Add(rt); }
-                else _bot.WantedResources.Remove(rt);
+                if (chip.Checked) { if (!_bot.T.WantedResources.Contains(rt)) _bot.T.WantedResources.Add(rt); }
+                else _bot.T.WantedResources.Remove(rt);
                 ApplyResources();
             };
             _resourceChips.Add(chip);
@@ -623,40 +623,40 @@ public sealed class MainForm : Form
 
         _numRange = new NumberField(100, 50000, 100, (int)_cfg.Bot.FallbackRange, "u");
         _numRange.ValueChanged += (_, _) =>
-            _bot.FallbackRange = _cfg.Bot.FallbackRange = _numRange.Value;
+            _bot.T.FallbackRange = _cfg.Bot.FallbackRange = _numRange.Value;
 
         _numRetreat = new NumberField(0, 95, 5, (int)(_cfg.Bot.RetreatHull * 100f), "%");
         _numRetreat.ValueChanged += (_, _) =>
-            _bot.RetreatHull = _cfg.Bot.RetreatHull = _numRetreat.Value / 100f;
+            _bot.T.RetreatHull = _cfg.Bot.RetreatHull = _numRetreat.Value / 100f;
 
         // From the rock's surface now, so the useful range starts much lower than it used to.
         _numRock = new NumberField(0, 5000, 10, (int)_cfg.Bot.AsteroidStandoff, "u");
         _numRock.ValueChanged += (_, _) =>
-            _bot.AsteroidStandoff = _cfg.Bot.AsteroidStandoff = _numRock.Value;
+            _bot.T.AsteroidStandoff = _cfg.Bot.AsteroidStandoff = _numRock.Value;
 
         // 0 means "work it out" — the automatic sources are all guesses of one kind or another,
         // so typing the real number in is the only way to be sure it flies at full speed.
         // These are the two numbers you read off the ship: cruise, and boost.
         _numSpeed = new NumberField(0, 2000, 5, (int)_cfg.Bot.TopSpeedOverride, "u/s");
         _numSpeed.ValueChanged += (_, _) =>
-            _bot.TopSpeedOverride = _cfg.Bot.TopSpeedOverride = _numSpeed.Value;
+            _bot.T.TopSpeedOverride = _cfg.Bot.TopSpeedOverride = _numSpeed.Value;
 
         _numBoost = new NumberField(0, 2000, 5, (int)_cfg.Bot.BoostSpeedOverride, "u/s");
         _numBoost.ValueChanged += (_, _) =>
-            _bot.BoostSpeedOverride = _cfg.Bot.BoostSpeedOverride = _numBoost.Value;
+            _bot.T.BoostSpeedOverride = _cfg.Bot.BoostSpeedOverride = _numBoost.Value;
 
 
         // Guessed, never published — the server states no reach for an emplacement, so this is
         // the one number you genuinely have to tune by being shot at. Live, not via bot.json.
         _numKeepOut = new NumberField(0, 20000, 100, (int)_cfg.Bot.HostileStationKeepOut, "u");
         _numKeepOut.ValueChanged += (_, _) =>
-            _bot.HostileStationKeepOut = _cfg.Bot.HostileStationKeepOut = _numKeepOut.Value;
+            _bot.T.HostileStationKeepOut = _cfg.Bot.HostileStationKeepOut = _numKeepOut.Value;
 
         // How far the ship will range for a richer rock. Squared falloff, so this is the distance
         // at which a rock counts for half its ore — small changes here move the behaviour a lot.
         _numTravel = new NumberField(100, 20000, 50, (int)_cfg.Bot.RockTravelPenalty, "u");
         _numTravel.ValueChanged += (_, _) =>
-            _bot.RockTravelPenalty = _cfg.Bot.RockTravelPenalty = _numTravel.Value;
+            _bot.T.RockTravelPenalty = _cfg.Bot.RockTravelPenalty = _numTravel.Value;
 
         card.Controls.Add(Rows(2,
             // The chip row must fit ALL of them, or the last is silently clipped off the bottom.
@@ -684,7 +684,7 @@ public sealed class MainForm : Form
         _suppressProfileEvents = true;
         try
         {
-            _bot.Mode = mode;
+            _bot.T.Mode = mode;
             _chipCombat.Checked = mode == FarmMode.Combat;
             _chipMining.Checked = mode == FarmMode.Mining;
         }

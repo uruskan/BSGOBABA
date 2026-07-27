@@ -12,6 +12,22 @@ public sealed partial class FarmBot
     // ------------------------------------------------------------------ mining
 
     /// <summary>
+    /// True when a resource filter is actually narrowing anything.
+    ///
+    /// Ticking every minable resource is not a filter — it is the default written out longhand.
+    /// Counting it as one was not harmless: the hold-fire rule in <see cref="MineAsync"/> parks
+    /// the guns until a rock is identified, which buys nothing at all when every possible answer
+    /// is one we accept. It only decided the order to fly to rocks in, and paid for that with a
+    /// scan-shaped stall on every unscanned rock.
+    /// </summary>
+    private bool Filtering =>
+        T.WantedResources.Count > 0 && !Array.TrueForAll(Resources.Minable, T.WantedResources.Contains);
+
+    /// <summary>Whether a scanned rock holds something we asked for.</summary>
+    private bool WantsResource(uint guid) =>
+        !Filtering || T.WantedResources.Contains((ResourceType)guid);
+
+    /// <summary>
     /// What decides where to sit on a rock. A real mining laser if you have one, otherwise your
     /// guns: an autocannon breaks an asteroid open perfectly well, and refusing to fire because
     /// no slot advertised a mining stat left the bot parked in range doing nothing.
@@ -30,14 +46,14 @@ public sealed partial class FarmBot
     /// <summary>
     /// Everything that actually shoots the rock. Owning one mining laser used to silence every
     /// other gun on the ship: the laser set the role, and the cannons — enabled, in range, idle —
-    /// were never asked. They break rocks too, so unless you turn <see cref="FireGunsWhileMining"/>
+    /// were never asked. They break rocks too, so unless you turn <see cref="BotTuning.FireGunsWhileMining"/>
     /// off, they fire alongside it. FireAll still range-checks each one, so a cannon with a dead
     /// zone at knife range simply skips its turn.
     /// </summary>
     private List<Weapon> MiningFireSet(List<Weapon> lasers, bool improvised)
     {
         // Improvised already IS the combat list, so there is nothing to add.
-        if (improvised || !FireGunsWhileMining) return lasers;
+        if (improvised || !T.FireGunsWhileMining) return lasers;
 
         var all = new List<Weapon>(lasers);
         var seen = lasers.Select(w => w.AbilityId).ToHashSet();
@@ -66,16 +82,6 @@ public sealed partial class FarmBot
             .ThenByDescending(w => w.MaxRange ?? 0f)
             .FirstOrDefault();
 
-    /// <summary>
-    /// How far to scan when nothing has published the scanner's reach.
-    ///
-    /// Deliberately short. The server checks the scan against the ability's own
-    /// <c>ObjectStat.MaxRange</c> and simply skips targets beyond it without a word
-    /// (bsgocore <c>ResourceScanAction.internalProcess</c>), so overstating the reach produces
-    /// silent nothing — which is exactly what a 3,000u guess did.
-    /// </summary>
-    public float ScanReachFallback { get; set; } = 600f;
-
     /// <summary>The furthest a scan has ever actually been ANSWERED from. Measured, so it beats
     /// every guess: the server only replies for targets inside the ability's real reach.</summary>
     private float _scanProvenRange;
@@ -102,7 +108,7 @@ public sealed partial class FarmBot
         var (mineGuns, _) = MiningWeapons();
         float mining = mineGuns.Count > 0 ? EffectiveRange(mineGuns) : 0f;
 
-        return Math.Max(Math.Max(ScanReachFallback, mining), _scanProvenRange * 1.25f);
+        return Math.Max(Math.Max(T.ScanReachFallback, mining), _scanProvenRange * 1.25f);
     }
 
     /// <summary>
@@ -132,14 +138,14 @@ public sealed partial class FarmBot
     /// </summary>
     private async Task SelfRepairAsync()
     {
-        if (!UseRepairAbility) return;
-        if (_world.MyHullFraction is not { } hull || hull >= RepairAtHull) return;
+        if (!T.UseRepairAbility) return;
+        if (_world.MyHullFraction is not { } hull || hull >= T.RepairAtHull) return;
         if (_world.MyObjectId == 0) return;
 
         var now = DateTime.UtcNow;
         foreach (var w in Weapons.For(WeaponRole.Repair))
         {
-            double interval = w.Cooldown is { } cd && cd > 0 ? cd * 1000.0 : RepairIntervalMs;
+            double interval = w.Cooldown is { } cd && cd > 0 ? cd * 1000.0 : T.RepairIntervalMs;
             if ((now - w.LastFired).TotalMilliseconds < interval) continue;
             if (!CanAfford(w)) continue;
 
@@ -168,7 +174,7 @@ public sealed partial class FarmBot
             await ProbeForScannerAsync(now);
             return;
         }
-        double interval = scanner.Cooldown is { } cd && cd > 0 ? cd * 1000.0 : ScanIntervalMs;
+        double interval = scanner.Cooldown is { } cd && cd > 0 ? cd * 1000.0 : T.ScanIntervalMs;
         if ((now - scanner.LastFired).TotalMilliseconds < interval) return;
 
         // Nothing downstream reads the answer when we'll mine whatever is nearest anyway.
@@ -177,7 +183,7 @@ public sealed partial class FarmBot
         // as narrowing — correctly, because the guns must not be held for it — but the scan is
         // still read: it carries the ore COUNT, which is what ranks one confirmed rock above
         // another in RockValue. Gating the sweep on the narrowing test would have thrown that away.
-        if (ScanOnlyWhenFiltering && WantedResources.Count == 0) return;
+        if (T.ScanOnlyWhenFiltering && T.WantedResources.Count == 0) return;
 
         // Already holding a queue of confirmed rocks? Then a scan buys nothing but a flat battery.
         // Scanning ran unconditionally before this, so a ship sitting on four known water rocks
@@ -196,15 +202,15 @@ public sealed partial class FarmBot
 
         // Weapon.MaxRange, not the raw slot stat. The stat stream is the only source the raw
         // lookup consults, and this server never sends it — so the scanner's reach fell back to
-        // FallbackRange (3000u) and the range you typed into the loadout panel was ignored.
+        // T.FallbackRange (3000u) and the range you typed into the loadout panel was ignored.
         //
         // Overstating the reach is not harmless: the batch then carries rocks the server
         // considers out of range, it refuses the cast outright, and a refusal is silent. That is
         // the "cast 3 times with no reply — most likely out of power cells" warning, which had
         // nothing to do with power cells.
         //
-        // Which is exactly the argument RequireKnownReach makes for the guns, so the scanner is
-        // held to it too. It used to fall through to FallbackRange regardless — aiming on the
+        // Which is exactly the argument T.RequireKnownReach makes for the guns, so the scanner is
+        // held to it too. It used to fall through to T.FallbackRange regardless — aiming on the
         // very guess the setting exists to forbid, and manufacturing the silent refusals that
         // then read as a flat battery.
         float range = ScanReach();
@@ -224,7 +230,7 @@ public sealed partial class FarmBot
                 .Where(o => NeedsScan(o, now) && ScanDue(o.Id, now) && o.HasPosition)
                 .Where(o => (_world.DistanceToMe(o) ?? float.MaxValue) <= range)
                 .OrderBy(o => _world.DistanceToMe(o) ?? float.MaxValue)
-                .Take(MaxAreaScanTargets)
+                .Take(T.MaxAreaScanTargets)
                 .Select(o => o.Id)
                 .ToArray();
 
@@ -266,10 +272,10 @@ public sealed partial class FarmBot
         // it mineable, and it has proven it won't give one.
         int strikes;
         lock (_gate) strikes = _scanStrikes.GetValueOrDefault(rock.Id);
-        if (strikes >= ScanStrikesBeforeGone)
+        if (strikes >= T.ScanStrikesBeforeGone)
         {
             DropTarget(rock.Id, $"{strikes} scans answered by nothing — the rock is gone",
-                       TimeSpan.FromMinutes(MuteRockSkipMinutes), hard: true);
+                       TimeSpan.FromMinutes(T.MuteRockSkipMinutes), hard: true);
             return;
         }
 
@@ -317,7 +323,7 @@ public sealed partial class FarmBot
     /// </summary>
     private async Task ProbeForScannerAsync(DateTime now)
     {
-        if ((now - _lastProbe).TotalSeconds < ProbeIntervalSeconds) return;
+        if ((now - _lastProbe).TotalSeconds < T.ProbeIntervalSeconds) return;
 
         Weapon? candidate;
         lock (_gate)
@@ -327,7 +333,7 @@ public sealed partial class FarmBot
         var rock = _world.Nearest(o => EntityTypes.IsMinable(o.Id) && !o.Scanned);
         if (rock is null) return;
 
-        float reach = _world.SlotStat(candidate.AbilityId, ObjectStat.MaxRange) ?? FallbackRange;
+        float reach = _world.SlotStat(candidate.AbilityId, ObjectStat.MaxRange) ?? T.FallbackRange;
         if ((_world.DistanceToMe(rock) ?? float.MaxValue) > reach) return;
 
         // Each ability gets exactly one probe, so it must not be spent on a cast the server was
@@ -355,7 +361,7 @@ public sealed partial class FarmBot
         if (IsSkipped(o.Id)) return false;
         if (o.MiningCooldown > now) return false;      // can't be mined yet, so don't spend a scan on it
         if (!o.Scanned) return true;
-        return (now - o.ScannedAt).TotalSeconds > ScanFreshnessSeconds;
+        return (now - o.ScannedAt).TotalSeconds > T.ScanFreshnessSeconds;
     }
 
     private bool IsProbed(ushort abilityId)
@@ -369,7 +375,7 @@ public sealed partial class FarmBot
     {
         lock (_gate)
             return !_scanAsked.TryGetValue(id, out var asked)
-                || (now - asked).TotalSeconds > ScanRetrySeconds;
+                || (now - asked).TotalSeconds > T.ScanRetrySeconds;
     }
 
     /// <summary>
@@ -379,7 +385,7 @@ public sealed partial class FarmBot
     /// the two scanner shapes want opposite policies.
     ///
     /// An <b>area</b> scanner identifies a field per cast, so it is worth running until a queue
-    /// has built up — <see cref="ScanQueueDepth"/> — and pointless after that.
+    /// has built up — <see cref="BotTuning.ScanQueueDepth"/> — and pointless after that.
     ///
     /// A <b>single-target</b> scanner identifies one rock per cast. A queue built one rock at a
     /// time costs mining time for information that only matters when the current rock runs out,
@@ -396,7 +402,7 @@ public sealed partial class FarmBot
         if (TargetNeedsScan(now)) return true;
 
         return AreaScanner
-            ? ConfirmedRocksNear(now) < ScanQueueDepth
+            ? ConfirmedRocksNear(now) < T.ScanQueueDepth
             : !_world.Snapshot().Any(o => MiningCandidate(o) && KnownContents(o, now));
     }
 
@@ -420,13 +426,13 @@ public sealed partial class FarmBot
     /// True when our own position is an estimate that has had time to go wrong: the server has
     /// not stated where we are since the last time the ship was under way.
     ///
-    /// Both halves matter. A fix older than <see cref="SelfPositionTrustSeconds"/> is not by
+    /// Both halves matter. A fix older than <see cref="BotTuning.SelfPositionTrustSeconds"/> is not by
     /// itself a problem — a ship parked on a rock for two minutes has a two-minute-old fix and is
     /// exactly where that fix says, because nothing has moved it. Drift is something a flight
     /// does. So the test is "have we flown since the server last told us", not "is the fix old".
     /// </summary>
     private bool SelfPositionSuspect =>
-        _world.MyFixAgeSeconds > SelfPositionTrustSeconds && _world.MyFixAt < _movedAt;
+        _world.MyFixAgeSeconds > T.SelfPositionTrustSeconds && _world.MyFixAt < _movedAt;
 
     /// <summary>
     /// Stops and waits for the server to say where we actually are, when we are about to commit
@@ -449,7 +455,7 @@ public sealed partial class FarmBot
         }
 
         // Already asked and got nothing. Fly on the estimate rather than ask forever — see
-        // SelfPositionWaitSeconds. Re-arms by itself as soon as any fix arrives.
+        // T.SelfPositionWaitSeconds. Re-arms by itself as soon as any fix arrives.
         if (_fixWaitGaveUp) return false;
 
         if (_fixWaitSince == DateTime.MinValue)
@@ -459,7 +465,7 @@ public sealed partial class FarmBot
         }
 
         double waited = (now - _fixWaitSince).TotalSeconds;
-        if (waited > SelfPositionWaitSeconds)
+        if (waited > T.SelfPositionWaitSeconds)
         {
             _fixWaitGaveUp = true;
             if (!_fixWaitWarned)
@@ -498,7 +504,7 @@ public sealed partial class FarmBot
             var all = _world.Snapshot();
             int rocks = all.Count(o => EntityTypes.IsMinable(o.Id));
             int located = all.Count(o => EntityTypes.IsMinable(o.Id) && o.HasPosition);
-            string filter = !Filtering ? "" : $", filtering for {string.Join(" > ", WantedResources)}";
+            string filter = !Filtering ? "" : $", filtering for {string.Join(" > ", T.WantedResources)}";
             Status = rocks == 0
                 ? "No asteroids in the sector"
                 : located == 0
@@ -523,7 +529,7 @@ public sealed partial class FarmBot
         }
 
         float dist = _world.DistanceToMe(rock) ?? float.MaxValue;
-        float range = lasers.Count > 0 ? EffectiveRange(lasers) : FallbackRange;
+        float range = lasers.Count > 0 ? EffectiveRange(lasers) : T.FallbackRange;
         float preferred = StandoffFor(rock, lasers);
 
         // Say so when the keep-out is what sent us away.
@@ -538,7 +544,7 @@ public sealed partial class FarmBot
         if (dist > range)
         {
             Meter.Note(MiningActivity.Travelling, now);
-            if (AutoApproach)
+            if (T.AutoApproach)
             {
                 await SteerToward(rock, preferred);
                 Status = $"Closing on asteroid #{rock.Id:X8} — {dist:F0}u, hold at {preferred:F0}u"
@@ -559,7 +565,7 @@ public sealed partial class FarmBot
         if (await ConfirmPositionAsync(now)) return;
 
         // A rock doesn't dodge, but accuracy still falls off past optimal range — close in.
-        bool closing = AutoApproach && dist > preferred;
+        bool closing = T.AutoApproach && dist > preferred;
         if (closing) await SteerToward(rock, preferred);
         else await StopThrottleIfMoving();
 
@@ -573,7 +579,7 @@ public sealed partial class FarmBot
         await EnsureSubscribed(rock.Id);
 
         // Ordering a mining ship costs resources, so it goes out once per rock, not per tick.
-        if (UseMiningFacility && rock.Scanned && rock.IsMinable && _facilityOrdered.Add(rock.Id))
+        if (T.UseMiningFacility && rock.Scanned && rock.IsMinable && _facilityOrdered.Add(rock.Id))
         {
             await _act.Mine(rock.Id);
             Log?.Invoke($"Ordered a mining ship to #{rock.Id:X8}.");
@@ -617,7 +623,7 @@ public sealed partial class FarmBot
             {
                 _filterAbandoned = true;
                 Log?.Invoke($"Scanner has not answered {_scansWithoutReply} casts — mining unfiltered "
-                          + $"instead of waiting. Reload its consumable to get {string.Join(" > ", WantedResources)} "
+                          + $"instead of waiting. Reload its consumable to get {string.Join(" > ", T.WantedResources)} "
                           + "filtering back.");
             }
         }
@@ -633,7 +639,7 @@ public sealed partial class FarmBot
         // any rock the ship was still creeping towards — so a rock that no longer existed was
         // farmed forever, showing "closing to 180u, holding (cooldown)" while nothing happened.
         // And a naive "arm it whenever we are in range" condemns innocent rocks whenever the guns
-        // are held for want of a known reach or by HoldFireUntilOptimal.
+        // are held for want of a known reach or by T.HoldFireUntilOptimal.
         bool ableToFire = shooting.Any(w => CanEngage(w, dist, closing));
         if (!ableToFire)
         {
@@ -646,7 +652,7 @@ public sealed partial class FarmBot
 
             Meter.Note(MiningActivity.Holding, now);
             Status = $"Holding fire on #{rock.Id:X8} at {dist:F0}u — "
-                   + (shooting.Any(w => !RequireKnownReach || ReachKnown(w))
+                   + (shooting.Any(w => !T.RequireKnownReach || ReachKnown(w))
                        ? "no mining slot is inside its own firing band yet"
                        : "no reach known for any mining slot (no server stats, no card, nothing "
                        + "typed in) — fill it in on the loadout panel");
@@ -690,7 +696,7 @@ public sealed partial class FarmBot
     /// </summary>
     private void WarnAboutStationBubble(SpaceObj chosen, float dist, DateTime now)
     {
-        if (!AvoidHostileStations) return;
+        if (!T.AvoidHostileStations) return;
         if (dist < LocalRadius) return;
         if ((now - _bubbleWarnedAt).TotalSeconds < 60) return;
 
@@ -710,7 +716,7 @@ public sealed partial class FarmBot
         // (SectorFactory / SpaceObject.ExtractFaction) — an Ancient or Cylon platform parked next
         // to a friendly outpost is a different object from the outpost, and the client calls it
         // an enemy by exactly the same rule this does.
-        Log?.Invoke($"{blocked} asteroid(s) are inside the {HostileStationKeepOut:F0}u keep-out "
+        Log?.Invoke($"{blocked} asteroid(s) are inside the {T.HostileStationKeepOut:F0}u keep-out "
                   + $"around {nearest} ({EntityTypes.FactionOf(nearest.Id)}, "
                   + $"{_world.RelationTo(nearest.Id)}) — skipping them and travelling {dist:F0}u "
                   + "instead. Lower KEEP OFF GUNS, or turn off \"Avoid stations\", to mine them.");
@@ -822,7 +828,7 @@ public sealed partial class FarmBot
     /// </summary>
     private float RockValue(SpaceObj o, float distance)
     {
-        float t = distance / Math.Max(RockTravelPenalty, 1f);
+        float t = distance / Math.Max(T.RockTravelPenalty, 1f);
         return o.ResourceCount / (1f + t * t);
     }
 
@@ -830,7 +836,7 @@ public sealed partial class FarmBot
     /// Where to go when nothing passes the normal filter.
     ///
     /// Almost everything <see cref="MiningCandidate"/> rejects is a BELIEF rather than a fact. A
-    /// scan saying "empty" or "wrong resource" is up to <see cref="ScanFreshnessSeconds"/> old and
+    /// scan saying "empty" or "wrong resource" is up to <see cref="BotTuning.ScanFreshnessSeconds"/> old and
     /// the server refills rocks on its own timer. A skip is a note that an approach stalled
     /// minutes ago. Neither is a reason to sit still — so when the filter comes up empty those
     /// beliefs are dropped and the ship goes to the nearest rock it has no current knowledge of,
@@ -892,7 +898,7 @@ public sealed partial class FarmBot
         if (!Filtering)
             return _world.Nearest(Confirmed) is not null ? Confirmed : null;
 
-        foreach (var want in WantedResources)
+        foreach (var want in T.WantedResources)
         {
             uint guid = (uint)want;
             bool Tier(SpaceObj o) => Confirmed(o) && o.ResourceGuid == guid;
@@ -905,7 +911,7 @@ public sealed partial class FarmBot
     /// <summary>A scan we still believe. Anything older has had time to respawn as something
     /// else and is treated as "we don't know" rather than as fact.</summary>
     private bool KnownContents(SpaceObj o, DateTime now) =>
-        o.Scanned && (now - o.ScannedAt).TotalSeconds <= ScanFreshnessSeconds;
+        o.Scanned && (now - o.ScannedAt).TotalSeconds <= T.ScanFreshnessSeconds;
 
     /// <summary>
     /// Rocks we have a fresh scan for, that hold what you asked for, and that we could go and

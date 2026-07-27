@@ -35,12 +35,12 @@ public sealed partial class FarmBot
     {
         get
         {
-            if (TopSpeedOverride > 0f) return TopSpeedOverride;
+            if (T.TopSpeedOverride > 0f) return T.TopSpeedOverride;
 
             float stat = _world.ShipStat(ObjectStat.Speed) ?? 0f;
             if (stat > 0f) return stat;
 
-            return Math.Max(_observedTopSpeed, FallbackSpeed);
+            return Math.Max(_observedTopSpeed, T.FallbackSpeed);
         }
     }
 
@@ -81,7 +81,7 @@ public sealed partial class FarmBot
     {
         get
         {
-            if (BoostSpeedOverride > 0f) return BoostSpeedOverride;
+            if (T.BoostSpeedOverride > 0f) return T.BoostSpeedOverride;
             return _world.ShipStat(ObjectStat.BoostSpeed) ?? 0f;
         }
     }
@@ -107,8 +107,8 @@ public sealed partial class FarmBot
     /// </summary>
     private float BoostRunway(float stopRange)
     {
-        float brake = Math.Clamp(BoostSpeed * BrakingSeconds, MinBrakeDistance, BrakingDistance);
-        return stopRange + brake + BoostSpeed * BoostShedSeconds;
+        float brake = Math.Clamp(BoostSpeed * T.BrakingSeconds, T.MinBrakeDistance, T.BrakingDistance);
+        return stopRange + brake + BoostSpeed * T.BoostShedSeconds;
     }
 
     /// <summary>
@@ -131,19 +131,19 @@ public sealed partial class FarmBot
         // how far a second is depends on which gear we're in. It needs nothing but the distance,
         // so there is no circularity — and if an obstacle forces Regular later, the zones stay
         // sized for boost, which errs towards more room rather than less.
-        var gear = UseBoost && BoostSpeed > 0f && distance > BoostRunway(stopRange)
+        var gear = T.UseBoost && BoostSpeed > 0f && distance > BoostRunway(stopRange)
             ? Gear.Boost
             : Gear.Regular;
         float flying = SpeedInGear(gear);
 
-        // The zone is how far this ship travels in BrakingSeconds, not a flat number, and it is
+        // The zone is how far this ship travels in T.BrakingSeconds, not a flat number, and it is
         // no longer widened by the standoff. `Max(700, stopRange)` meant a 179u hold on a rock
-        // started braking at 879u and crawled the last stretch at MinApproachSpeed — around a
+        // started braking at 879u and crawled the last stretch at T.MinApproachSpeed — around a
         // minute of creeping across ground the ship could cover in seconds.
-        float brakeZone = Math.Clamp(flying * BrakingSeconds, MinBrakeDistance, BrakingDistance);
+        float brakeZone = Math.Clamp(flying * T.BrakingSeconds, T.MinBrakeDistance, T.BrakingDistance);
 
         // Look no further than the target itself: something past it is not in the way.
-        float lookahead = Math.Min(distance, Math.Max(flying * CollisionLookaheadSeconds, brakeZone * 2f));
+        float lookahead = Math.Min(distance, Math.Max(flying * T.CollisionLookaheadSeconds, brakeZone * 2f));
         var heading = DeflectAroundObstacles(desired, lookahead, target.Id, now, out bool deflected);
 
         // After the deflection, not before: the watchdog has to know whether we are stalled or
@@ -177,7 +177,7 @@ public sealed partial class FarmBot
             float t = Math.Clamp((distance - stopRange) / brakeZone, 0f, 1f);
             // Square-root taper: full speed for most of the zone, hard braking only at the end,
             // where a linear ramp spends its whole length barely moving.
-            throttle = Math.Max(TopSpeed * MathF.Sqrt(t), MinApproachSpeed);
+            throttle = Math.Max(TopSpeed * MathF.Sqrt(t), T.MinApproachSpeed);
         }
 
         // Brake for what is in the way as well as for what we're aiming at. Turning takes room,
@@ -188,7 +188,7 @@ public sealed partial class FarmBot
         {
             // Getting OUT of something outranks arriving at something. The old line took the
             // minimum of the two, so a ship inside a big rock's clearance sphere — gap 0, taper
-            // 0, throttle pinned to MinApproachSpeed — crawled its way out over tens of seconds
+            // 0, throttle pinned to T.MinApproachSpeed — crawled its way out over tens of seconds
             // while the mining brake held it down as well. That is the wedge: the one state where
             // the ship is definitely in the wrong place is the state it left at walking pace.
             throttle = blocker.Id == _escapeFrom
@@ -237,7 +237,7 @@ public sealed partial class FarmBot
     {
         gap = float.MaxValue;
 
-        if (!AvoidCollisions || !_world.MyPositionKnown || heading.LengthSquared() < 1e-4f) return null;
+        if (!T.AvoidCollisions || !_world.MyPositionKnown || heading.LengthSquared() < 1e-4f) return null;
 
         var me = _world.MyPosition;
         var dir = Vector3.Normalize(heading);
@@ -256,7 +256,7 @@ public sealed partial class FarmBot
             // Hysteresis on the one we are getting out of: it counts as "inside" until we are
             // clear of it by a margin. Leaving on the exact boundary is what let the ship exit a
             // big rock's sphere and be aimed straight back into it on the very next tick.
-            if (o.Id == _escapeFrom) clear *= EscapeClearance;
+            if (o.Id == _escapeFrom) clear *= T.EscapeClearance;
 
             // Already inside it. Tested before anything about our heading, because once the ship
             // is within a big body's clearance sphere the direction it is pointing stops being
@@ -339,7 +339,7 @@ public sealed partial class FarmBot
 
         float along = Vector3.Dot(toObs, dir);
         float clear = ClearanceOf(blocker);
-        if (blocker.Id == _escapeFrom) clear *= EscapeClearance;
+        if (blocker.Id == _escapeFrom) clear *= T.EscapeClearance;
 
         // Inside it: there is no "around" to steer, only "out". Straight away from the centre is
         // the shortest way back to open space, and it is the one heading that is guaranteed to
@@ -428,12 +428,8 @@ public sealed partial class FarmBot
     {
         float zone = Math.Max(brakeZone, ClearanceOf(blocker));
         float t = Math.Clamp(gap / zone, 0f, 1f);
-        return Math.Max(TopSpeed * MathF.Sqrt(t), MinApproachSpeed);
+        return Math.Max(TopSpeed * MathF.Sqrt(t), T.MinApproachSpeed);
     }
-
-    /// <summary>How far past an obstacle's clearance to get before we stop calling ourselves
-    /// inside it. Pure hysteresis: it exists so leaving is a decision, not a boundary case.</summary>
-    public float EscapeClearance { get; set; } = 1.25f;
 
     /// <summary>
     /// Throttle while backing out of something we are already inside.
@@ -449,13 +445,13 @@ public sealed partial class FarmBot
         var vel = _world.MyVelocity;
 
         bool leaving = vel.LengthSquared() < 1f || Vector3.Dot(vel, away) > 0f;
-        return leaving ? TopSpeed : Math.Max(TopSpeed * 0.5f, MinApproachSpeed);
+        return leaving ? TopSpeed : Math.Max(TopSpeed * 0.5f, T.MinApproachSpeed);
     }
 
     /// <summary>
     /// How much room a solid object needs to be flown PAST, measured from its centre.
     ///
-    /// Deliberately not <see cref="RadiusClearance"/>. That multiplier (×3) is a *standoff*
+    /// Deliberately not <see cref="BotTuning.RadiusClearance"/>. That multiplier (×3) is a *standoff*
     /// figure — where to park when you have a choice — and it was briefly used here on the
     /// argument that the two halves of the program should agree about how big things are. They
     /// should not: parking beside a body and threading between bodies are different questions,
@@ -492,12 +488,12 @@ public sealed partial class FarmBot
             // SpaceObjectFactory.createAsteroid), so the published radius is generous already and
             // the margin only has to cover our own hull.
             SpaceEntityType.Asteroid =>
-                r * AsteroidColliderFactor + Math.Max(AsteroidCollisionMargin, MyRadius),
+                r * AsteroidColliderFactor + Math.Max(T.AsteroidCollisionMargin, MyRadius),
 
             // Proportional, because a planetoid's published radius is the one figure that is
             // definitely not conservative, and hitting one is not a scrape.
             SpaceEntityType.Planetoid =>
-                r * PlanetoidClearanceFactor + Math.Max(PlanetoidCollisionMargin, MyRadius * 2f),
+                r * T.PlanetoidClearanceFactor + Math.Max(T.PlanetoidCollisionMargin, MyRadius * 2f),
 
             _ => r + SafetyMargin,
         };
@@ -519,7 +515,7 @@ public sealed partial class FarmBot
     ///
     /// Floored by twice our own hull, which is the number the margin is actually for.
     /// </summary>
-    private float SafetyMargin => Math.Max(CollisionMargin, MyRadius * 2f);
+    private float SafetyMargin => Math.Max(T.CollisionMargin, MyRadius * 2f);
 
     /// <summary>Our own half-size, from our hull's World card. 0 until the card arrives.</summary>
     private float MyRadius
@@ -593,7 +589,7 @@ public sealed partial class FarmBot
     /// </summary>
     private float OrbitRadius(SpaceObj station)
     {
-        float inner = ClearanceOf(station) * StandoffMargin;
+        float inner = ClearanceOf(station) * T.StandoffMargin;
         float outer = DockRange(station);
         return outer > inner ? (inner + outer) * 0.5f : inner;
     }
@@ -608,11 +604,11 @@ public sealed partial class FarmBot
     {
         // Running is the fastest the ship ever goes, so the room it reserves to turn and stop has
         // to be sized for the boosted speed, not the throttle number.
-        var gear = UseBoost && BoostSpeed > 0f ? Gear.Boost : Gear.Regular;
+        var gear = T.UseBoost && BoostSpeed > 0f ? Gear.Boost : Gear.Regular;
         float flying = SpeedInGear(gear);
 
-        float brakeZone = Math.Clamp(flying * BrakingSeconds, MinBrakeDistance, BrakingDistance);
-        float lookahead = Math.Max(flying * CollisionLookaheadSeconds, brakeZone * 2f);
+        float brakeZone = Math.Clamp(flying * T.BrakingSeconds, T.MinBrakeDistance, T.BrakingDistance);
+        float lookahead = Math.Max(flying * T.CollisionLookaheadSeconds, brakeZone * 2f);
 
         var heading = DeflectAroundObstacles(want, lookahead, 0, now, out bool deflected);
 
@@ -714,10 +710,10 @@ public sealed partial class FarmBot
             // reason to be anywhere else however long the door takes.
             if (hull > _refugeHullBest) _refugeHullBest = hull;
 
-            bool bleeding = hull < _refugeHullBest - RefugeBleedFraction;
+            bool bleeding = hull < _refugeHullBest - T.RefugeBleedFraction;
 
             if (threat is not null && bleeding && !DockCountdownRunning
-                && (now - _dockTrySince).TotalSeconds > DockGiveUpSeconds)
+                && (now - _dockTrySince).TotalSeconds > T.DockGiveUpSeconds)
             {
                 lock (_gate) _dockRefused.Add(refuge.Id);
                 Log?.Invoke($"{refuge} is not taking us in and the hull has fallen from "
@@ -757,7 +753,7 @@ public sealed partial class FarmBot
                 ? $"circling at {_world.DistanceToMe(refuge) ?? 0f:F0}u"
                 : $"holding at {gap:F0}u";
 
-            if (!AllowDocking)
+            if (!T.AllowDocking)
             {
                 if (!_dockDisabledSaid)
                 {
@@ -765,7 +761,7 @@ public sealed partial class FarmBot
                     Log?.Invoke($"At {refuge} ({gap:F0}u) — holding here rather than docking. "
                               + "Docking is off because every request the bot has sent dropped "
                               + "the session; the outpost's guns are the point anyway. Set "
-                              + "AllowDocking in bot.json to try it.");
+                              + "T.AllowDocking in bot.json to try it.");
                 }
                 Status = $"HULL {hull:P0} — sheltering at {refuge}, {holding}, not docking{chased}";
                 return;
@@ -836,7 +832,7 @@ public sealed partial class FarmBot
 
         if (_learnedDockRange > 0) return _learnedDockRange * 0.9f;
 
-        return Math.Max(DockApproach, station.Radius * RadiusClearance + MinimumStandoff);
+        return Math.Max(T.DockApproach, station.Radius * T.RadiusClearance + T.MinimumStandoff);
     }
 
     /// <summary>The Owner card for an object, which is where dockability actually lives.</summary>
@@ -867,11 +863,11 @@ public sealed partial class FarmBot
 
     /// <summary>Nearest friendly place to dock, with no opinion about which way the threat is.</summary>
     private SpaceObj? NearestRefuge() =>
-        FleeToOutpost ? _world.Nearest(CanDockAt) : null;
+        T.FleeToOutpost ? _world.Nearest(CanDockAt) : null;
 
     private SpaceObj? SafeOutpost(SpaceObj threat)
     {
-        if (!FleeToOutpost || !_world.MyPositionKnown) return null;
+        if (!T.FleeToOutpost || !_world.MyPositionKnown) return null;
 
         var me = _world.MyPosition;
         var toThreat = threat.PredictedPosition(DateTime.UtcNow) - me;
@@ -1013,7 +1009,7 @@ public sealed partial class FarmBot
         if (detouring)
         {
             if (_detourSince == DateTime.MinValue) _detourSince = now;
-            if ((now - _detourSince).TotalSeconds < DetourPatienceSeconds)
+            if ((now - _detourSince).TotalSeconds < T.DetourPatienceSeconds)
             {
                 _approachSince = now;
                 return false;

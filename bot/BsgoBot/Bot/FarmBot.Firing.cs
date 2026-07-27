@@ -19,7 +19,7 @@ public sealed partial class FarmBot
     private float EffectiveRange(List<Weapon> guns)
     {
         var known = guns.Where(w => w.MaxRange is > 0).Select(w => w.MaxRange!.Value).ToList();
-        return known.Count > 0 ? known.Max() : FallbackRange;
+        return known.Count > 0 ? known.Max() : T.FallbackRange;
     }
 
     /// <summary>
@@ -43,10 +43,10 @@ public sealed partial class FarmBot
     /// </summary>
     private bool CanEngage(Weapon w, float distance, bool stillClosing)
     {
-        if (RequireKnownReach && !ReachKnown(w)) return false;
+        if (T.RequireKnownReach && !ReachKnown(w)) return false;
         if (w.MaxRange is { } max && distance > max) return false;
         if (w.MinRange is { } min && distance < min) return false;
-        if (HoldFireUntilOptimal && stillClosing
+        if (T.HoldFireUntilOptimal && stillClosing
             && w.OptimalRange is { } opt && opt > 0 && distance > opt) return false;
         return true;
     }
@@ -66,14 +66,14 @@ public sealed partial class FarmBot
 
         float band = optimal.Count > 0 ? optimal.Min()
                    : max.Count > 0 ? max.Min()
-                   : FallbackRange;
+                   : T.FallbackRange;
 
         float want = band * factor;
 
         var mins = guns.Where(w => w.MinRange is > 0).Select(w => w.MinRange!.Value).ToList();
         if (mins.Count > 0) want = Math.Max(want, mins.Max() * 1.2f);
 
-        return Math.Max(want, MinimumStandoff);
+        return Math.Max(want, T.MinimumStandoff);
     }
 
     /// <summary>
@@ -100,13 +100,13 @@ public sealed partial class FarmBot
             // for as long as the bot was pointed at the rock: closing, shoved out, closing again,
             // never in position, never firing. A standoff the avoidance will not permit is not a
             // standoff.
-            case SpaceEntityType.Asteroid when AsteroidStandoff > 0:
+            case SpaceEntityType.Asteroid when T.AsteroidStandoff > 0:
             {
                 // A gap to the SURFACE, plus the rock's own radius — not a distance from its
                 // centre. Centre-to-centre made the setting meaningless: it was floored by
                 // radius + margin, so on any rock bigger than the number you typed the floor won
                 // and typing 50 changed nothing you could see.
-                float gap = target.Radius + AsteroidStandoff;
+                float gap = target.Radius + T.AsteroidStandoff;
 
                 // And never exactly ON the clearance sphere, which is what the old
                 // Max(standoff, ClearanceOf) produced whenever the floor won. Park on the
@@ -114,7 +114,7 @@ public sealed partial class FarmBot
                 // target — one drift, one rotation, one re-target and the ship is suddenly
                 // escaping the thing it was mining a moment ago. That is the churn in the log:
                 // engage at 168u, then "0u of room left ahead" against the very same rock.
-                float floor = ClearanceOf(target) * StandoffMargin;
+                float floor = ClearanceOf(target) * T.StandoffMargin;
 
                 // Reach still caps it, but never below the floor: a firing position we would
                 // treat as a collision is not a firing position.
@@ -126,23 +126,23 @@ public sealed partial class FarmBot
             // own size, because the configured number is a flat 1200u and planetoids are not all
             // smaller than that — holding at 1200u from the centre of something with a 2000u
             // radius is not a standoff, it is a stated intention to fly into it.
-            case SpaceEntityType.Planetoid when PlanetoidStandoff > 0:
+            case SpaceEntityType.Planetoid when T.PlanetoidStandoff > 0:
                 // The same clearance the collision code uses, so the approach cannot ask for a
                 // hold position the avoidance considers a collision — which is a standoff and a
                 // dodge pulling against each other for as long as the bot is pointed at it.
                 return target.Radius > 0
-                    ? Math.Max(PlanetoidStandoff, ClearanceOf(target))
-                    : PlanetoidStandoff;
+                    ? Math.Max(T.PlanetoidStandoff, ClearanceOf(target))
+                    : T.PlanetoidStandoff;
         }
 
         // Closing inside the optimal band only buys anything against something that manoeuvres.
         // Anything that sits still gets the full band: same accuracy, more clearance.
-        float factor = EntityTypes.IsStatic(target.Id) ? 1f : CloseInFactor;
+        float factor = EntityTypes.IsStatic(target.Id) ? 1f : T.CloseInFactor;
         float want = PreferredRange(guns, factor);
 
         float clear = target.Radius > 0
-            ? target.Radius * RadiusClearance + MinimumStandoff
-            : MinimumStandoff;
+            ? target.Radius * T.RadiusClearance + T.MinimumStandoff
+            : T.MinimumStandoff;
 
         float stop = Math.Max(want, clear);
 
@@ -172,7 +172,7 @@ public sealed partial class FarmBot
     private bool CanAffordScan(Weapon scanner)
     {
         if (scanner.PowerCost is not { } cost || cost <= 0f) return true;
-        float reserve = (_world.MyMaxPower ?? 0f) * ScanPowerReserve;
+        float reserve = (_world.MyMaxPower ?? 0f) * T.ScanPowerReserve;
         return _world.MyPower >= cost + reserve;
     }
 
@@ -198,7 +198,7 @@ public sealed partial class FarmBot
         {
             if (!CastAllowed(w.AbilityId, target.Id)) continue;
 
-            if (RequireKnownReach && !ReachKnown(w))
+            if (T.RequireKnownReach && !ReachKnown(w))
                 WarnOnce($"ability #{w.AbilityId} has no known reach from stats, the catalogue "
                        + "or your loadout — holding fire rather than guessing.");
 
@@ -210,7 +210,7 @@ public sealed partial class FarmBot
             // can produce, and the server closed the connection immediately after every one of
             // them. Spreading them over consecutive ticks costs a fraction of a second of
             // damage and stops the bot looking like a packet flood.
-            if (w.Kind != WeaponKind.Toggle && castsThisTick >= MaxCastsPerTick) continue;
+            if (w.Kind != WeaponKind.Toggle && castsThisTick >= T.MaxCastsPerTick) continue;
 
             if (w.Kind == WeaponKind.Toggle)
             {
@@ -232,7 +232,7 @@ public sealed partial class FarmBot
 
             double interval = w.Cooldown is { } cd && cd > 0
                 ? cd * 1000.0
-                : FallbackFireIntervalMs;
+                : T.FallbackFireIntervalMs;
 
             if ((now - w.LastFired).TotalMilliseconds < interval) continue;
 
@@ -435,7 +435,7 @@ public sealed partial class FarmBot
             if (pin != 0)
             {
                 var held = _world.Get(pin);
-                bool shaped = Mode == FarmMode.Mining ? EntityTypes.IsMinable(pin) : !EntityTypes.IsMinable(pin);
+                bool shaped = T.Mode == FarmMode.Mining ? EntityTypes.IsMinable(pin) : !EntityTypes.IsMinable(pin);
 
                 // A pin we have since given up on does not get to win. It used to: the only
                 // release was the object leaving the world, and a rock the server never sent a
@@ -499,7 +499,7 @@ public sealed partial class FarmBot
     /// </summary>
     private bool ClientCanSee(uint id)
     {
-        if (!HuntOnlyVisible) return true;
+        if (!T.HuntOnlyVisible) return true;
 
         var det = _world.Detection;
         if (!det.Known) return true;
@@ -522,19 +522,9 @@ public sealed partial class FarmBot
         _lockedTarget = id;
     }
 
-    /// <summary>
-    /// Ask the server to stream the target's hull and power.
-    ///
-    /// Was briefly disabled on the theory that it caused the combat disconnects, being the one
-    /// message combat sends and mining does not. A session that sent none of them and dropped
-    /// anyway settled that: it is innocent, so it is back on. It supplies the target's hull
-    /// readout and <c>TargetId</c>, which is how the bot knows something has locked us.
-    /// </summary>
-    public bool SubscribeToTarget { get; set; } = true;
-
     private async Task EnsureSubscribed(uint id)
     {
-        if (!SubscribeToTarget) return;
+        if (!T.SubscribeToTarget) return;
         if (_subscribedTarget == id) return;
         if (_subscribedTarget != 0)
         {
@@ -631,9 +621,9 @@ public sealed partial class FarmBot
             return false;
         }
 
-        if ((now - _mineProgressAt).TotalSeconds < MiningStallSeconds) return false;
+        if ((now - _mineProgressAt).TotalSeconds < T.MiningStallSeconds) return false;
 
-        DropTarget(rock.Id, $"{MiningStallSeconds:F0}s of firing with no damage dealt and no ore "
+        DropTarget(rock.Id, $"{T.MiningStallSeconds:F0}s of firing with no damage dealt and no ore "
                           + "banked — it is gone, or we cannot reach it",
                    TimeSpan.FromMinutes(5), hard: true);
         return true;
@@ -660,11 +650,11 @@ public sealed partial class FarmBot
         }
         _holdSeen = now;
 
-        if ((now - _holdSince).TotalSeconds < HeldFirePatienceSeconds) return false;
+        if ((now - _holdSince).TotalSeconds < T.HeldFirePatienceSeconds) return false;
 
-        DropTarget(rockId, $"engaged {HeldFirePatienceSeconds:F0}s without a single shot possible "
+        DropTarget(rockId, $"engaged {T.HeldFirePatienceSeconds:F0}s without a single shot possible "
                          + $"— {why}",
-                   TimeSpan.FromMinutes(MuteRockSkipMinutes), hard: true);
+                   TimeSpan.FromMinutes(T.MuteRockSkipMinutes), hard: true);
         return true;
     }
 
