@@ -355,10 +355,18 @@ public sealed partial class FarmBot
             // us now are new ones — and any id-keyed verdict we still hold describes a different
             // sector's objects. Clearing twice costs nothing; not clearing costs half an hour of
             // skipping good rocks.
+            // The world map has to go too, not just the verdicts. Without RemoveMe nothing ever
+            // removed the old sector's objects from WorldState, so every rock from the last
+            // sector kept its id and position on the map, the new sector's objects merged in on
+            // top, and the bot flew to asteroids that are a sector away — the "ghost rocks".
+            // Clearing here is safe on ordering: the client sends JumpIn from inside the space
+            // level's loading screen (SpaceLevel.PreloadLevel) and the server streams the new
+            // sector's WhoIs only after it, so nothing real is thrown away.
             case GameOp.Request.JumpIn:
+                _world.Clear();
                 ForgetSectorState();
                 Log?.Invoke("Client sent Game/JumpIn (61) — its space level has finished loading. "
-                          + "Forgot the last sector's skipped and scanned rocks.");
+                          + "Dropped the old sector's map and verdicts.");
                 break;
 
             // You picked a target by hand — respect it if it suits the current mode.
