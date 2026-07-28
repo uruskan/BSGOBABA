@@ -70,6 +70,10 @@ public sealed class MainForm : Form
     private readonly List<(string Title, ToggleChip Chip, Control View)> _views = [];
     private bool _switchingView;
 
+    /// <summary>Height each rail card needs, worked out by the card itself while it is built.
+    /// The rail clips rather than grows, so these must come from the content, not from memory.</summary>
+    private int _connectionHeight, _controlHeight, _tuningHeight;
+
     /// <summary>Stand-in list for when no server profile is selected, so the loadout panel is
     /// still constructible instead of needing a null check on every draw.</summary>
     private readonly List<SavedSlot> _noSlots = [];
@@ -408,14 +412,18 @@ public sealed class MainForm : Form
         _btnSecond.Text = "Second bot";
         _btnSecond.Click += (_, _) => LaunchSecondInstance();
 
-        var grid = Rows(2,
-            // One entry per ROW, and Rows() sizes the grid from this array — a cell past the end
-            // lands in a row that does not exist and renders at zero height, which is how the ship
-            // picker shipped invisible. Adding a row here means growing the rail's own absolute
-            // height in BuildContent too.
-            [15, 32, 15, 32, 32, 15, 32, 32, 32, 32, 32, 32, 38],
+        // One entry per ROW. Rows() sizes the grid from this array, so a cell past the end lands
+        // in a row that does not exist and renders at zero height — which is how the ship picker
+        // shipped invisible. The rail's own height is computed from the same array, so adding a
+        // row here is now the only edit needed.
+        int[] heights = [15, 32, 15, 32, 15, 32, 32, 32, 32, 32, 32, 38];
+        _connectionHeight = CardHeight(heights);
+
+        var grid = Rows(2, heights,
             (RailCaption("SERVER"), 2), (_serverBox, 2),
-            (RailCaption("SHIP"), 2), (_shipBox, 2), (_btnAddShip, 2),
+            // Picker and Add share a row: the rail is long enough to scroll already, and this is
+            // the one card you stop looking at once the session is up.
+            (RailCaption("SHIP"), 2), (_shipBox, 1), (_btnAddShip, 1),
             (RailCaption("CLIENT"), 2), (_clientBox, 2),
             (_btnProfiles, 1), (_btnLaunch, 1),
             (_btnCatch, 2),
@@ -432,6 +440,11 @@ public sealed class MainForm : Form
     private Control BuildControlCard()
     {
         var card = new Card("Control") { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 8) };
+
+        // Chips wrap, so this one cannot be derived from a row array the way the others are. It
+        // is measured off the rendered card rather than counted: eight rows of chips at 28 plus
+        // the mode row. Raise it if a chip is ever added and the last row goes missing.
+        _controlHeight = 268;
         var flow = new FlowLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -616,10 +629,12 @@ public sealed class MainForm : Form
         _numTravel.ValueChanged += (_, _) =>
             _bot.T.RockTravelPenalty = _cfg.Tuning.RockTravelPenalty = _numTravel.Value;
 
-        card.Controls.Add(Rows(2,
-            // The chip row must fit ALL of them, or the last is silently clipped off the bottom.
-            // Three resources at two per rail-width is two rows of 30, with room for a fourth.
-            [18, 62, 30, 30, 30, 30, 30, 30, 30, 30],
+        // The chip row must fit ALL of them, or the last is silently clipped off the bottom.
+        // Three resources at two per rail-width is two rows of 30, with room for a fourth.
+        int[] heights = [18, 62, 30, 30, 30, 30, 30, 30, 30, 30];
+        _tuningHeight = CardHeight(heights);
+
+        card.Controls.Add(Rows(2, heights,
             (RailCaption("MINE  (click in priority order)"), 2),
             (BuildResourceChips(), 2),
             (RailCaption("RETREAT AT HULL"), 1), (_numRetreat, 1),
@@ -794,19 +809,22 @@ public sealed class MainForm : Form
             Padding = new Padding(12, 10, 6, 10),
             AutoScroll = true,
         };
-        // Connection: 15 + 32 for SERVER, the same again for SHIP plus a 32 button, 15 + 32 for
-        // CLIENT, six 32s of buttons and a 38 for Go farm, plus the card's own chrome.
-        rail.RowStyles.Add(new RowStyle(SizeType.Absolute, 306 + 79));  // connection
-        rail.RowStyles.Add(new RowStyle(SizeType.Absolute, 268));      // control
-        // Must match BuildTuningCard's row heights (18 + 62 + eight 30s) plus the card's own 40px
-        // of chrome. Rows were added here before without this growing, which silently clipped the
-        // last of them off the bottom of the panel.
-        rail.RowStyles.Add(new RowStyle(SizeType.Absolute, 18 + 62 + 8 * 30 + 40));  // tuning
+        // Build first, size second. Each card works out the height it needs from the very array
+        // its grid is built from and reports it, so the rail cannot disagree with its contents.
+        // Hand-written constants here clipped the Go farm button off the bottom for as long as
+        // anyone can tell, and then did the same to the ship picker.
+        var connection = BuildConnectionCard();
+        var control = BuildControlCard();
+        var tuning = BuildTuningCard();
+
+        rail.RowStyles.Add(new RowStyle(SizeType.Absolute, _connectionHeight));
+        rail.RowStyles.Add(new RowStyle(SizeType.Absolute, _controlHeight));
+        rail.RowStyles.Add(new RowStyle(SizeType.Absolute, _tuningHeight));
         rail.RowStyles.Add(new RowStyle(SizeType.Percent, 100));   // slack, so nothing stretches
 
-        rail.Controls.Add(BuildConnectionCard(), 0, 0);
-        rail.Controls.Add(BuildControlCard(), 0, 1);
-        rail.Controls.Add(BuildTuningCard(), 0, 2);
+        rail.Controls.Add(connection, 0, 0);
+        rail.Controls.Add(control, 0, 1);
+        rail.Controls.Add(tuning, 0, 2);
         return rail;
     }
 
@@ -889,6 +907,25 @@ public sealed class MainForm : Form
     /// Lays controls into a fixed grid inside a card. Each entry carries how many columns it
     /// spans, so a full-width button and a pair of half-width ones share one description.
     /// </summary>
+    /// <summary>Bottom margin <see cref="Rows"/> puts under every cell.</summary>
+    private const int RowGap = 4;
+
+    /// <summary>Vertical chrome a <see cref="Card"/> adds around its content: its own top and
+    /// bottom padding, plus the 8px margin each card carries below itself in the rail.</summary>
+    private const int CardChrome = 30 + 10 + 8;
+
+    /// <summary>
+    /// How tall a rail row has to be for a <see cref="Rows"/> grid inside a card to fit.
+    ///
+    /// The rail sizes its rows absolutely — it does not grow to fit what it holds, it clips. That
+    /// has cost the Go farm button, the ship picker and the hull-size field one at a time, each
+    /// time by someone adding a row and not knowing there was a second number to change. So the
+    /// number is computed from the same array the grid is built from, and there is no longer a
+    /// second number to forget.
+    /// </summary>
+    private static int CardHeight(int[] heights) =>
+        heights.Sum() + heights.Length * RowGap + CardChrome;
+
     private static TableLayoutPanel Rows(int columns, int[] heights,
                                          params (Control Control, int Span)[] cells)
     {
