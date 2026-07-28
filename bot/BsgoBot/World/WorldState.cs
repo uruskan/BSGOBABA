@@ -598,6 +598,15 @@ public sealed class WorldState
     {
         if ((SceneOp.Reply)msgType != SceneOp.Reply.LoadNextScene) return;
 
+        // The one moment a sector change is BOTH certain and early enough. RemoveMe is not
+        // always sent to us (hand jumps, cross-sector respawns), and the client's JumpIn is
+        // too LATE: the server streams the new sector's every WhoIs while the loading screen
+        // is still up — the client literally waits for those objects' cards before sending
+        // JumpIn — so a clear there wipes the rocks that were just announced, and a static
+        // rock never announces itself twice. This message precedes the whole stream, which
+        // makes it the only safe wipe point for a sector change RemoveMe didn't cover.
+        Clear();
+
         r.ReadByte();                             // TransSceneType
         var location = (GameLocation)r.ReadByte();
 

@@ -377,21 +377,20 @@ public sealed partial class FarmBot
             // us now are new ones — and any id-keyed verdict we still hold describes a different
             // sector's objects. Clearing twice costs nothing; not clearing costs half an hour of
             // skipping good rocks.
-            // The world map has to go too, not just the verdicts. Without RemoveMe nothing ever
-            // removed the old sector's objects from WorldState, so every rock from the last
-            // sector kept its id and position on the map, the new sector's objects merged in on
-            // top, and the bot flew to asteroids that are a sector away — the "ghost rocks".
-            // Clearing here is safe on ordering: the client sends JumpIn from inside the space
-            // level's loading screen (SpaceLevel.PreloadLevel) and the server streams the new
-            // sector's WhoIs only after it, so nothing real is thrown away.
+            // The world map is NOT cleared here — that was tried, and it blinded the bot. The
+            // server streams the new sector's every WhoIs while the loading screen is still up
+            // (the client waits for those objects' cards before sending this very message), so
+            // a clear here wiped the rocks just announced, and a static rock never announces
+            // itself twice. The world wipe lives on Scene/LoadNextScene, which precedes the
+            // stream; this late hook only drops the id-keyed verdicts, which is cheap to do
+            // twice and must happen even when no scene message was seen.
             case GameOp.Request.JumpIn:
-                _world.Clear();
                 ForgetSectorState();
                 // Out of the sector, this is the launch succeeding client-side: the hangar
                 // machine must stop asking and let the server finish. See HangarTickAsync.
                 if (_hangarSince is not null) _clientJumpInAt = DateTime.UtcNow;
                 Log?.Invoke("Client sent Game/JumpIn (61) — its space level has finished loading. "
-                          + "Dropped the old sector's map and verdicts.");
+                          + "Dropped the old sector's verdicts.");
                 break;
 
             // You picked a target by hand — respect it if it suits the current mode.

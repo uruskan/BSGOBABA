@@ -882,14 +882,27 @@ public sealed class MainForm : Form
 
     private Control BuildLeftRail()
     {
-        var rail = new TableLayoutPanel
+        // The rail is taller than any window now — three cards of controls — so it lives inside
+        // a scroll host. NOT TableLayoutPanel.AutoScroll: that combination quietly failed to
+        // produce a scrollbar, which is how TARGET SECTOR shipped invisible below the window
+        // edge on a 1440p screen. A plain Panel scroll host with a Top-docked, self-sized table
+        // is the WinForms arrangement that actually scrolls.
+        var host = new Panel
         {
             Dock = DockStyle.Fill,
             BackColor = Theme.Bg,
-            ColumnCount = 1,
-            RowCount = 4,
-            Padding = new Padding(12, 10, 6, 10),
             AutoScroll = true,
+        };
+
+        var rail = new TableLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            BackColor = Theme.Bg,
+            ColumnCount = 1,
+            RowCount = 3,
+            Padding = new Padding(12, 10, 6, 10),
         };
         // Build first, size second. Each card works out the height it needs from the very array
         // its grid is built from and reports it, so the rail cannot disagree with its contents.
@@ -902,12 +915,13 @@ public sealed class MainForm : Form
         rail.RowStyles.Add(new RowStyle(SizeType.Absolute, _connectionHeight));
         rail.RowStyles.Add(new RowStyle(SizeType.Absolute, _controlHeight));
         rail.RowStyles.Add(new RowStyle(SizeType.Absolute, _tuningHeight));
-        rail.RowStyles.Add(new RowStyle(SizeType.Percent, 100));   // slack, so nothing stretches
 
         rail.Controls.Add(connection, 0, 0);
         rail.Controls.Add(control, 0, 1);
         rail.Controls.Add(tuning, 0, 2);
-        return rail;
+
+        host.Controls.Add(rail);
+        return host;
     }
 
     private Control BuildRail()
