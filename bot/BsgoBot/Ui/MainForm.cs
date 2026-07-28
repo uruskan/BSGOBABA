@@ -753,7 +753,11 @@ public sealed class MainForm : Form
             RowCount = 1,
             Padding = new Padding(0),
         };
-        split.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 296));  // controls
+        // The left rail scrolls now, and its scrollbar comes out of this column's width. Without
+        // paying for it here the cards lose ~17px, the widest chip pair stops fitting two to a
+        // row, and the fixed card height clips whatever chip is last — which was Fetch cards.
+        split.ColumnStyles.Add(new ColumnStyle(
+            SizeType.Absolute, 296 + SystemInformation.VerticalScrollBarWidth));  // controls
         split.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));   // map + log
         split.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 330));  // read-outs
 
