@@ -272,8 +272,16 @@ Both modes take loot automatically, and give up on a target they've failed to cl
 
 ## How the bot decides
 
-Every rule below is in `Bot/FarmBot.cs`. Where a number is a **guess** rather than something
-read off the wire, it says so — those are the ones to tune first.
+The rules below live in `Bot/FarmBot.*.cs` — one `partial class` per concern: `Mining`,
+`Combat`, `Firing`, `Navigation`, `Hangar`, `Follow`, `Traffic`, `Diagnostics`, plus the tick
+loop itself in `FarmBot.cs`. Every tunable number is on `BotTuning`, reached as `bot.T`.
+
+Where a number is a **guess** rather than something read off the wire, it says so — those are
+the ones to tune first.
+
+**Settings are per ship.** A `ShipProfile` carries a `BotTuning`, the slot descriptions and the
+learned ability ids, and the SHIP dropdown switches between them. A Raptor and a Vanir disagree
+about nearly every number here, so one global set could only ever be right for one of them.
 
 ### Which weapons fire
 

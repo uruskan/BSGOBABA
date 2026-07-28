@@ -102,6 +102,16 @@ has the most fitted slots, then the old rules. `HangarSummary()` reports all of 
 first slot list that actually has content is dumped to the log with each slot's id, system guid
 and resolved ability action.
 
+**That second step is a guess, and guesses may not destroy anything.** On an account owning a
+Vanir and a Raptor, "most fitted slots" answers *Vanir* whichever hull is in space. The refit
+sweep — which withdraws a declaration when the slot's catalogue guid disagrees with what you
+described — was reading it, so every declaration belonging to the other ship disagreed and all of
+them were withdrawn, including the scanner's role and its published reach. The bot then had no
+scanner and went back to test-firing utility slots hunting for one.
+
+Anything destructive asks `ConfirmedLoadout` instead, which returns the id-matched entry or
+nothing at all. A guess may inform a picture; it may not invalidate something you typed.
+
 ### Declaring a loadout switches off the guessing
 
 `WeaponBook.For(role)` treats a roleless remembered ability as a weapon **only while nothing has
@@ -278,13 +288,35 @@ first one to arrive after a jump.
 
 | Target | Distance |
 |---|---|
-| Asteroid | `AsteroidStandoff` (default **120u**) + the rock's radius, clamped to `reach × 0.95` |
+| Asteroid | the mining weapon's **optimal band**, floored by `AsteroidStandoff` + the rock's radius and by its clearance sphere, clamped to `reach × 0.95` |
 | Planetoid | `PlanetoidStandoff` (default **1200u**), not clamped, floored by its clearance |
 | Moving target | `optimal × CloseInFactor` (0.6), floored by `radius × 3 + 150` |
 | Static target | full `optimal`, floored the same way |
 
-Explicit numbers beat derived ones — the published radius is a bounding figure, not the visual
-hull. Accuracy is flat at or below optimal, so a low standoff costs nothing (see GAME.md §6).
+`AsteroidStandoff` is a **floor**, not a destination. It used to be the destination, which flew a
+Vanir to 307u of a rock its Badgers reach at 1,350u — a thousand units of travel into a rock
+field for nothing. Accuracy is flat at or below optimal (GAME.md §6), so a shot from the edge of
+the band lands as often as one from arm's length, and the band is where to sit. Strike ships are
+unaffected in kind: a Gopher's 350u optimal is under the floor on any decent rock.
+
+An unpublished optimal keeps the old close-in behaviour. `PreferredRange` falls back to **max**
+range when optimal is unknown, and max is the one answer that must never be chosen — hit chance
+falls off past optimal, so parking at 95% of reach is parking where the shots miss.
+
+### Firing arc
+
+In range is not the same as able to shoot. Every weapon has an arc the server enforces
+(`Algorithm3D.isWeaponPositionInRange` takes the ability's `Angle`), and an out-of-arc cast is
+refused in **exactly the same silence** as a cast at a rock that no longer exists. The two are
+indistinguishable from the reply, so a rock 500u off the beam was being written off as gone.
+
+Holding station therefore means holding the nose on the target: an out-of-arc rock keeps
+steering at the standoff already occupied, which turns the ship without driving it anywhere. The
+stall watchdog checks the arc before condemning anything. The narrowest fitted arc decides it —
+a gun set is only on target when all of them bear.
+
+This needs `WorldState.MyFacing`, which comes from the heading itself rather than the velocity
+vector: mining is done stopped, and a ship at rest has no velocity to infer a facing from.
 
 ### Clearance — how big a thing is treated as
 
@@ -297,7 +329,39 @@ range spanning two orders of magnitude:
 |---|---|---|
 | Asteroid | `radius × 0.9 + max(AsteroidCollisionMargin 40, our hull)` | the server builds an asteroid's collider as `radius × 0.9` (`SpaceObjectFactory.createAsteroid`), so the published radius is already generous; the margin only has to cover our own hull |
 | Planetoid | `radius × 1.25 + max(PlanetoidCollisionMargin 500, our hull × 2)` | there are few of them, none are on the way to anything, and we arrive at cruise |
-| Everything else | `radius + max(CollisionMargin 70, our hull × 2)` | ships, stations, debris |
+| Everything else | `radius + max(CollisionMargin 70, our hull)` | ships, stations, debris |
+
+**"Our hull" is measured, not published.** `Reply.WhoIs` carries a radius for asteroids,
+planetoids, planets, triggers and volumes — and for **no ship of any kind, ours included**. Real
+collision runs off per-prefab collider templates that never reach the wire and are not spheres
+(Galactica's is a box of 200 × 75 × 600 half-extents). So there are three sources, best first:
+`HullRadius` typed in per ship; otherwise the furthest hardpoint on the hull card from centre,
+which is real geometry the server itself computes weapon range from, and a **lower bound** since
+the hull runs past its outermost gun; otherwise the World card's own radius, which reads ~35u for
+an Advanced Vanir and is what had a line ship flying a belt like a strike craft.
+
+The `× 2` above was calibrated when that number was always ~35, so `35 × 2` landed on the 70u the
+margin already defaulted to and the term never bit. With a real half-size it does, and one radius
+is what the geometry asks: a hull rotating on the spot sweeps a sphere of its own half-length.
+
+### Collisions are worth costing, not always avoiding
+
+`0.5 × the asteroid's max hull points`, reduced by armour only where armour exceeds the
+collision's armour piercing of 50 — which a 40-armour line hull does not
+(`DamageCalculator.calculateDamageFromCollision`). **There is no speed term anywhere in it.**
+
+Two things follow. Braking buys no damage relief at all, only the seconds a turn needs — so it
+now happens only when it buys that turn, and only for asteroids (the angle test is a fair proxy
+for a rock and badly wrong for a planetoid, which keeps braking unconditionally). And whether a
+rock is worth avoiding is a comparison, not a yes/no: under `IgnoreCollisionHullFraction` of max
+hull it is flown through. A Vanir carries ~4,500 hull and recovers 35/s, so a small rock costs it
+three seconds of regeneration while turning a 27 m/s hull around it costs far longer. The
+threshold is a fraction of our own hull, so it scales across ships without a second setting.
+
+Hull points arrive only for objects we have **subscribed** to — in practice the rock being mined
+— so the rocks actually in the way publish a radius and nothing else. The radius-to-hull
+conversion is measured off the rocks we do know, applied at the 90th percentile, and nothing is
+skipped until five rocks have been measured. Never skipped on a guess.
 
 > A flat `+70u` made an 18u pebble an 88u no-go sphere — five times its own size — and in a belt
 > of those the ship is permanently inside somebody's, braking and steering around rocks it had
@@ -317,6 +381,34 @@ Speed tapers over the last `BrakingDistance` (700u), arriving at `MinApproachSpe
 A target we haven't closed on for 30s is skipped for 2 minutes — geometry, anchoring or a tow.
 
 ---
+
+## Choosing a rock, and keeping it
+
+Two different questions, and conflating them causes churn.
+
+**Choosing** prefers a confirmed-and-wanted rock over a nearer unconfirmed one, within
+`LocalRadius`. That radius used to be the scanner's reach, on the reasoning that everything
+inside it is knowable from where we stand — an argument about *knowledge* deciding *travel*. The
+two only coincide on a ship whose scanner and legs are matched: a declared 4,000u scanner made
+the whole belt "local", so a confirmed rock 3,500u out beat an unscanned one 200u away, which at
+27 m/s is a two-minute flight to save one scan. It is now also capped by how far the hull travels
+in `LocalTravelSeconds`, so it scales with speed.
+
+Choosing also skips rocks with a **hostile that moves** within `HostileShipKeepOut` — drones and
+NPC fighters, kept apart from `AvoidHostileStations` because the two want opposite handling. A
+platform is a *place*: back out of its envelope and it is solved. A drone is not a place, and
+backing away solves nothing because it follows. So it steers selection rather than triggering an
+escape; being shot at remains `IsThreat`'s business. Judged on predicted positions, and measured
+**drone-to-rock**, not drone-to-ship — the question is whether the rock has company, since that
+is where the ship parks motionless for twenty seconds.
+
+**Keeping** is deliberately looser and goes straight to `MiningCandidate`, without the keep-out. A
+drone's whereabouts changes every second, so applying it to retention made a rock thirty seconds
+into being broken stop qualifying because something drifted past — and the ship left, banking
+nothing, with the answer flipping back moments later. A worked rock is finished, not churned.
+
+Abandoning a live target logs a line naming it and how much damage went into it. That was silent,
+which is why a rock left half broken read identically to one that was finished.
 
 ## Farm loop (250ms tick)
 
