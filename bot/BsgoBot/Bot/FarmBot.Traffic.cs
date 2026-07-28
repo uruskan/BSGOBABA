@@ -191,6 +191,8 @@ public sealed partial class FarmBot
             // The condemned-rock lists. See the note above: leaving these behind is what makes a
             // fresh sector look like one the bot has already given up on.
             _skip.Clear(); _hardSkip.Clear();
+            // Which bodies we have asked the size of. Different sector, different bodies.
+            _sizeAsked.Clear();
         }
 
         // In-flight bookkeeping that names an id. None of these survive the objects they refer

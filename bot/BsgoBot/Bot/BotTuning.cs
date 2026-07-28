@@ -294,6 +294,20 @@ public sealed class BotTuning
     /// nothing about a planetoid's stated size is conservative.</summary>
     public float PlanetoidClearanceFactor { get; set; } = 1.25f;
 
+    /// <summary>
+    /// Size to assume for a planetoid the server has not published a radius for.
+    ///
+    /// Deliberately large. The radius arrives in a WhoIs body and for scenery it often never
+    /// arrives at all, and the old behaviour on silence was to assume ZERO — which made a body
+    /// two thousand units across into a 500u sphere and flew the ship straight through it.
+    /// Guessing high costs a wider berth around one object; guessing low costs the ship.
+    /// </summary>
+    public float PlanetoidAssumedRadius { get; set; } = 1500f;
+
+    /// <summary>Size to assume for an asteroid with no published radius. Small, because rocks are
+    /// small and are what the ship spends its life threading between — but not zero.</summary>
+    public float AsteroidAssumedRadius { get; set; } = 60f;
+
     /// <summary>How far ahead to look for obstacles, in seconds of travel at top speed. This has
     /// to cover the turn as well as the stop: the heading only updates a few times a second, so
     /// a deflection decided one ship-length out never lands.</summary>

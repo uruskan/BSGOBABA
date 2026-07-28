@@ -478,9 +478,39 @@ public sealed partial class FarmBot
     /// So: asteroids get their real collider and a small ship-sized margin; planetoids get a
     /// proportional one. Everything else — ships, stations, debris — keeps the old flat rule.
     /// </remarks>
+    /// <summary>
+    /// How big a solid body is, with an assumed size when the server has not said.
+    ///
+    /// <para>Radius arrives in one message only — <c>Reply.WhoIs</c> — and for a planetoid it
+    /// routinely never arrives at all, because the bot sees whatever WhoIs bodies the game client
+    /// happened to ask for and the client does not ask about scenery it is already drawing.
+    /// <see cref="ClearanceOf"/> used to read that silence as <c>radius 0</c>, which turned a body
+    /// a couple of thousand units across into a 500u sphere: the margin alone.</para>
+    ///
+    /// <para>The logs say exactly that. Every "room left ahead" figure against a planetoid sits at
+    /// 478-501u, pinned to <see cref="BotTuning.PlanetoidCollisionMargin"/>, with the low ones at
+    /// 54u and 59u — the ship threading what it thought was empty space and finding the surface.
+    /// That is the reported flying-through-planetoids.</para>
+    ///
+    /// <para>An unknown size is therefore assumed LARGE, and <see cref="AskUnknownSizesAsync"/>
+    /// asks the server for the real figure so the guess is temporary. Being wrong in this
+    /// direction costs a wider berth around one body; being wrong the other way costs the ship.</para>
+    /// </summary>
+    private float RadiusOf(SpaceObj o)
+    {
+        if (o.Radius > 0) return o.Radius;
+
+        return EntityTypes.Of(o.Id) switch
+        {
+            SpaceEntityType.Planetoid or SpaceEntityType.Planet => T.PlanetoidAssumedRadius,
+            SpaceEntityType.Asteroid => T.AsteroidAssumedRadius,
+            _ => 0f,
+        };
+    }
+
     private float ClearanceOf(SpaceObj o)
     {
-        float r = o.Radius > 0 ? o.Radius : 0f;
+        float r = RadiusOf(o);
 
         return EntityTypes.Of(o.Id) switch
         {
@@ -497,6 +527,42 @@ public sealed partial class FarmBot
 
             _ => r + SafetyMargin,
         };
+    }
+
+    /// <summary>Solid bodies we have asked the server to describe, so one unsized planetoid does
+    /// not produce a WhoIs every tick.</summary>
+    private readonly Dictionary<uint, DateTime> _sizeAsked = new();
+
+    /// <summary>
+    /// Ask the server how big the solid things around us actually are.
+    ///
+    /// <c>GameActions.WhoIs</c> has existed since the first build and nothing ever called it — the
+    /// bot read whatever WhoIs replies the client's own curiosity produced. That is fine for
+    /// ships, which the client subscribes to anyway, and useless for scenery: the client already
+    /// has the planetoid's model and never asks. So the one number that decides whether the ship
+    /// steers around a planetoid or into it was left to chance.
+    ///
+    /// A few per sweep, once a minute each, and only while collision avoidance is on.
+    /// </summary>
+    private async Task AskUnknownSizesAsync(DateTime now)
+    {
+        if (!T.AvoidCollisions) return;
+
+        int asked = 0;
+        foreach (var o in _world.Snapshot())
+        {
+            if (asked >= 3) break;
+            if (!o.HasPosition || o.Radius > 0 || !EntityTypes.IsSolid(o.Id)) continue;
+
+            lock (_gate)
+            {
+                if (_sizeAsked.TryGetValue(o.Id, out var at) && (now - at).TotalSeconds < 60) continue;
+                _sizeAsked[o.Id] = now;
+            }
+
+            await _act.WhoIs(o.Id);
+            asked++;
+        }
     }
 
     /// <summary>The server's own asteroid collider is <c>radius * 0.9</c>. Not a tunable: it is

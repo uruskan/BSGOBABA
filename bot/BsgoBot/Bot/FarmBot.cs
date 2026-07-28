@@ -503,6 +503,10 @@ public sealed partial class FarmBot
             if (learned > 0)
                 Log?.Invoke($"Learned {learned} slot(s) from the catalogue — ranges, reload, "
                           + "power and role, with nothing typed in.");
+
+            // How big the solid things around us are. Same clock, because a body whose size we
+            // are guessing at is one we are steering around on a guess.
+            await AskUnknownSizesAsync(DateTime.UtcNow);
         }
 
         // Not in the sector: dead, docked, or jumping. Getting back out is its own sequence and

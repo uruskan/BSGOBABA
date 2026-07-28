@@ -125,6 +125,17 @@ public sealed partial class FarmBot
             lines.Add($"clearance      asteroid r×{AsteroidColliderFactor:F2} +{T.AsteroidCollisionMargin:F0}u, "
                     + $"planetoid r×{T.PlanetoidClearanceFactor:F2} +{T.PlanetoidCollisionMargin:F0}u, "
                     + $"other r +{SafetyMargin:F0}u (hull {MyRadius:F0}u)");
+
+            // Whether the sizes those clearances are built on are real or assumed. An assumed one
+            // is not a problem in itself -- it is deliberately large -- but it is worth seeing,
+            // because it means the server never described a body the ship is steering around.
+            var unsized = _world.Snapshot()
+                .Where(o => o.HasPosition && o.Radius <= 0 && EntityTypes.IsSolid(o.Id))
+                .ToList();
+            if (unsized.Count > 0)
+                lines.Add($"assumed size   {unsized.Count} solid body(s) with no radius from the "
+                        + $"server — planetoid {T.PlanetoidAssumedRadius:F0}u, asteroid "
+                        + $"{T.AsteroidAssumedRadius:F0}u assumed, WhoIs asked");
             lines.Add($"collisions     avoiding, radius +{T.CollisionMargin:F0}u, looking "
                     + $"{TopSpeed * T.CollisionLookaheadSeconds:F0}u ahead — "
                     + (_world.MyVelocity.LengthSquared() < 1f ? "not moving"
