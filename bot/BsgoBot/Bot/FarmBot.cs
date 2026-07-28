@@ -100,6 +100,18 @@ public sealed partial class FarmBot
     private uint _escapeFrom;
     private DateTime _escapeSince = DateTime.MinValue;
 
+    /// <summary>
+    /// The planetoid we are deliberately flying INTO, because the current target sits inside
+    /// its collider. Hitting a planetoid costs no hull — the server answers contact with a
+    /// shove once a second and nothing else — so a buried rock is reached by diving after it,
+    /// not by orbiting the wall forever. While set, that one body is invisible to the collision
+    /// avoidance: dodging it and escaping it would both fight the dive.
+    /// </summary>
+    private uint _diveThrough;
+
+    /// <summary>Target the dive was last logged for, so the log gets one line per rock.</summary>
+    private uint _diveNoted;
+
     /// <summary>Rock we are roaming to with nothing better to do, so the log says so once.</summary>
     private uint _roamTarget;
 
@@ -217,6 +229,25 @@ public sealed partial class FarmBot
     private DateTime _respawnAnswered = DateTime.MinValue;
     private DateTime _lastLaunchAsk = DateTime.MinValue;
     private int _launchAsks;
+
+    /// <summary>When the client last sent its own Game/JumpIn while we were out of the sector.
+    /// Its space level is loaded, so the launch is out of our hands — the only thing left is for
+    /// the server to spawn our ship, and injecting anything more just desyncs the client.
+    /// MinValue while no such wait is running.</summary>
+    private DateTime _clientJumpInAt = DateTime.MinValue;
+
+    /// <summary>How often, this hangar spell, the client loaded space and the server still never
+    /// spawned our ship. Not reset by a sector-left — the whole point is to count across the
+    /// relaunch cycles of one wedge — only by actually flying or a fresh session.</summary>
+    private int _spawnWaitFailures;
+
+    /// <summary>How long after the client's JumpIn the ship may take to spawn. The healthy
+    /// launches in the logs run 0.1–6.3s from JumpIn to "Identified my ship".</summary>
+    private const double SpawnWaitSeconds = 15;
+
+    /// <summary>JumpIn-then-no-spawn cycles before the farm gives up and stops. The alternative
+    /// was proven on 2026-07-28: forty cycles in half an hour, ending with the client dead.</summary>
+    private const int MaxSpawnWaitFailures = 3;
     private bool _repairAsked;
     private DateTime _repairAskedAt = DateTime.MinValue;
     private float? _conditionBeforeRepair;
@@ -274,6 +305,11 @@ public sealed partial class FarmBot
     /// <summary>Measured throughput — regen, ore per hour, and where the time actually goes.
     /// See <see cref="MiningMeter"/> for why none of this can be read off an item card.</summary>
     public MiningMeter Meter { get; } = new();
+
+    /// <summary>The historic record of farm runs — which loadout in which sector banked what.
+    /// The UI gives it a file via <see cref="SessionLog.Open"/>; without one it still tracks,
+    /// it just forgets on exit.</summary>
+    public SessionLog Sessions { get; } = new();
 
     /// <summary>Most recent moment any weapon fired, so the meter can discard contaminated
     /// power samples.</summary>
@@ -378,6 +414,14 @@ public sealed partial class FarmBot
         Cards.Log += m => Log?.Invoke(m);
         _world.ObjectIdentified += OnObjectIdentified;
 
+        // Also how you discover a sector's id in the first place: stand in it (or dock over it)
+        // and read the line.
+        _world.SectorIdentified += id => Log?.Invoke(
+            $"Sector: {id}"
+            + (T.TargetSectorId == 0 ? ""
+               : id == T.TargetSectorId ? " — the target sector."
+               : $" — target is {T.TargetSectorId}, the bot will travel."));
+
         Fights.Log += m => Log?.Invoke(m);
         _world.LoadoutChanged += DumpLoadoutOnce;
         // Names come from the catalogue, so a fight record reads "colonial_raider" rather than
@@ -400,7 +444,12 @@ public sealed partial class FarmBot
         _world.ShipConditionChanged += OnShipCondition;
         _world.AnchorChanged += OnAnchorChanged;
         _world.ScanReceived += OnScanReceived;
-        _world.HoldGained += items => Meter.OnHoldGained(items, DateTime.UtcNow);
+        _world.HoldGained += items =>
+        {
+            Meter.OnHoldGained(items, DateTime.UtcNow);
+            Sessions.OnGained(items);
+        };
+        Sessions.Log += m => Log?.Invoke(m);
 
         Weapons.Learned += (w, isNew) =>
         {
@@ -440,6 +489,12 @@ public sealed partial class FarmBot
             {
                 _lastCardSave = DateTime.UtcNow;
                 Cards.SaveCache();
+
+                // Back-fills what Start could not know (the sector is only named on a scene
+                // change) and keeps the live run on disk, so a crash costs minutes not the run.
+                Sessions.NoteContext(_world.CurrentSectorId,
+                                     _world.MyLoadout?.Name ?? "", _world.MyShipGuid, Deaths);
+                Sessions.SaveIfDirty();
             }
         }
         catch
@@ -471,8 +526,15 @@ public sealed partial class FarmBot
         _scansWithoutReply = 0;
         _ammoWarned = false;
 
+        // Same reasoning for a stood-down travel: giving up was built on evidence — an empty
+        // hold, a refused jump — that pressing Go farm says has been dealt with.
+        _travelGaveUp = false;
+        _hopAsked = 0; _hopAsks = 0;
+        _sectorUnknownSaid = false;
+
         Enabled = true;
         Status = "Starting";
+        Sessions.Begin(_world.CurrentSectorId, _world.MyLoadout?.Name ?? "", _world.MyShipGuid, Deaths);
         _timer.Change(0, 250);
         Log?.Invoke("Farm started.");
     }
@@ -482,6 +544,7 @@ public sealed partial class FarmBot
         Enabled = false;
         _timer.Change(Timeout.Infinite, Timeout.Infinite);
         _ = DisengageAsync("farm stopped");
+        Sessions.End();
         Status = "Idle";
         Log?.Invoke("Farm stopped.");
     }
@@ -665,6 +728,10 @@ public sealed partial class FarmBot
             await FollowTick();
             return;
         }
+
+        // The wrong sector outranks everything the sector contains. Below the guards — a jump
+        // charge is not armour — and above the farm, because these rocks are not the farm.
+        if (await TravelTickAsync(DateTime.UtcNow)) return;
 
         if (T.AutoLoot) await SweepLootAsync();
 

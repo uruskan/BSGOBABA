@@ -248,3 +248,38 @@ public sealed record ShipListCardInfo(
     uint CardGuid,
     IReadOnlyList<uint> ShipCardGuids,
     IReadOnlyList<uint> UpgradeShipCardGuids);
+
+/// <summary>
+/// One star on the galaxy map — client <c>MapStarDesc.Read</c>. Position is in the map's own
+/// 2D units, the same units <c>ObjectStat.FtlRange</c> is measured in: the client's CanJump
+/// test is a plain magnitude comparison between the two, with no scaling.
+/// </summary>
+public sealed record MapStarInfo(
+    uint SectorId,
+    float X,
+    float Y,
+    byte GuiIndex,
+    byte Faction,
+    short ColonialThreatLevel,
+    short CylonThreatLevel,
+    uint SectorGuid,
+    bool CanColonialOutpost,
+    bool CanCylonOutpost);
+
+/// <summary>
+/// <c>CardView.GalaxyMap</c> (30), always guid <see cref="RootCards.GalaxyMap"/> — the whole
+/// star map in one card: every sector's id and 2D position. Between this and the ship's
+/// FtlRange stat, a jump route is a graph search rather than a hardcoded pattern.
+/// </summary>
+public sealed record GalaxyMapCardInfo(
+    uint CardGuid,
+    IReadOnlyList<MapStarInfo> Stars)
+{
+    public MapStarInfo? Star(uint sectorId) => Stars.FirstOrDefault(s => s.SectorId == sectorId);
+
+    public float Distance(MapStarInfo a, MapStarInfo b)
+    {
+        float dx = a.X - b.X, dy = a.Y - b.Y;
+        return MathF.Sqrt(dx * dx + dy * dy);
+    }
+}

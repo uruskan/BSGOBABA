@@ -144,6 +144,12 @@ public sealed partial class FarmBot
 
         // Look no further than the target itself: something past it is not in the way.
         float lookahead = Math.Min(distance, Math.Max(flying * T.CollisionLookaheadSeconds, brakeZone * 2f));
+
+        // Decided before the deflection, because it changes what counts as an obstacle at all:
+        // a target buried inside a planetoid makes that one planetoid transparent for as long
+        // as it stays the target.
+        _diveThrough = TargetBuriedIn(target, now);
+
         var heading = DeflectAroundObstacles(desired, lookahead, target.Id, now, out bool deflected);
 
         // After the deflection, not before: the watchdog has to know whether we are stalled or
@@ -254,6 +260,12 @@ public sealed partial class FarmBot
         {
             if (o.IsMe || o.Id == ignoreId || o.Id == _world.MyObjectId) continue;
             if (!o.HasPosition || !EntityTypes.IsSolid(o.Id)) continue;
+
+            // The planetoid the target is buried in. Skipped before every other test — including
+            // the already-inside one — because a dive needs it to stop existing entirely: dodging
+            // it steers away from the target, and "escaping" it drives the ship back out of the
+            // body it is trying to enter. Contact costs nothing; see TargetBuriedIn.
+            if (o.Id == _diveThrough) continue;
 
             // Measure whatever we can see, so the radius-to-hull conversion keeps improving.
             NoteRockSize(o);
@@ -416,6 +428,46 @@ public sealed partial class FarmBot
     }
 
     /// <summary>
+    /// The planetoid the target sits inside of, or 0 when it sits in open space like anything
+    /// normal.
+    ///
+    /// Rocks do spawn inside planetoids — the resource spawner places them around the body with
+    /// no exclusion for its collider — and a target inside the clearance sphere is one the
+    /// avoidance can never approach: the direct line always ends in the no-go zone, so the ship
+    /// deflects forever, orbits the wall, and the watchdog eventually skips a perfectly minable
+    /// rock. The honest answer is to dive: planetoid contact deals NO damage (bsgocore
+    /// CollisionResolution has no damage path for it — only a PulseManeuver shove, rate-limited
+    /// to once a second and capped in force), so a ship that keeps its throttle open pushes
+    /// through the wall and gets the rock. The approach watchdog stays armed as the backstop for
+    /// the times the shove wins anyway.
+    ///
+    /// Keyed on the CLEARANCE sphere rather than the bare collider, deliberately: a rock in the
+    /// shell between the two is technically in open space, but its approach line still ends
+    /// inside the no-go zone and deflects forever all the same.
+    /// </summary>
+    private uint TargetBuriedIn(SpaceObj target, DateTime now)
+    {
+        if (!T.AvoidCollisions) return 0;
+
+        var pos = target.PredictedPosition(now);
+        foreach (var o in _world.Snapshot())
+        {
+            if (o.Id == target.Id || !o.HasPosition) continue;
+            if (EntityTypes.Of(o.Id) != SpaceEntityType.Planetoid) continue;
+            if (Vector3.Distance(o.PredictedPosition(now), pos) >= ClearanceOf(o)) continue;
+
+            if (_diveNoted != target.Id)
+            {
+                _diveNoted = target.Id;
+                Log?.Invoke($"{target} sits inside {o}'s collider — diving straight in. "
+                          + "The wall costs no hull, only a shove once a second.");
+            }
+            return o.Id;
+        }
+        return 0;
+    }
+
+    /// <summary>
     /// Which way the ship is actually travelling, for deciding what it is about to hit. Falls
     /// back to the ordered heading when we're stationary or the server hasn't sent a velocity —
     /// at rest the two are the same thing anyway.
@@ -491,37 +543,40 @@ public sealed partial class FarmBot
     /// Split by what the body actually is, because one number cannot serve both ends of a range
     /// that spans two orders of magnitude. A flat +70u on an 18u pebble is a no-go sphere five
     /// times the rock's own size, and in a belt of those the ship is permanently inside somebody's
-    /// — that is the "35u of room left ahead" churn. The same +70u on a 1,500u planetoid is 4% of
-    /// its radius, which is no margin at all on something you arrive at doing 80u/s.
+    /// — that is the "35u of room left ahead" churn. The same +70u on a planetoid's 900u wall is
+    /// no margin at all on something you arrive at doing 80u/s.
     ///
-    /// So: asteroids get their real collider and a small ship-sized margin; planetoids get a
-    /// proportional one. Everything else — ships, stations, debris — keeps the old flat rule.
+    /// So: asteroids get their real collider and a small ship-sized margin; planetoids get the
+    /// server's fixed collider and a flat one. Everything else — ships, stations, debris — keeps
+    /// the old flat rule.
     /// </remarks>
     /// <summary>
-    /// How big a solid body is, with an assumed size when the server has not said.
+    /// How big a solid body is, as far as the server's collision code is concerned.
     ///
-    /// <para>Radius arrives in one message only — <c>Reply.WhoIs</c> — and for a planetoid it
-    /// routinely never arrives at all, because the bot sees whatever WhoIs bodies the game client
-    /// happened to ask for and the client does not ask about scenery it is already drawing.
-    /// <see cref="ClearanceOf"/> used to read that silence as <c>radius 0</c>, which turned a body
-    /// a couple of thousand units across into a 500u sphere: the margin alone.</para>
+    /// <para><b>A planetoid's published radius is not a size.</b> The wire field is the number
+    /// the client feeds into <c>localScale</c> to blow the model up (client <c>Planetoid.Read</c>)
+    /// — a scale factor, typically around 1 — while the server gives every planetoid the same
+    /// hard-coded 900u sphere collider regardless (bsgocore <c>SpaceObjectFactory.createPlanetoid</c>,
+    /// <c>new SphereCollider(..., 900)</c>). Trusting the wire number is what produced the 501u
+    /// clearance in the logs: half the real wall, so the ship aimed through space it believed
+    /// was clear and ground against the invisible part of the sphere. The visible surface tracks
+    /// the scaled model, not the collider — which is also why the "solid" part never matches
+    /// what you see on screen.</para>
     ///
-    /// <para>The logs say exactly that. Every "room left ahead" figure against a planetoid sits at
-    /// 478-501u, pinned to <see cref="BotTuning.PlanetoidCollisionMargin"/>, with the low ones at
-    /// 54u and 59u — the ship threading what it thought was empty space and finding the surface.
-    /// That is the reported flying-through-planetoids.</para>
-    ///
-    /// <para>An unknown size is therefore assumed LARGE, and <see cref="AskUnknownSizesAsync"/>
-    /// asks the server for the real figure so the guess is temporary. Being wrong in this
-    /// direction costs a wider berth around one body; being wrong the other way costs the ship.</para>
+    /// <para>Everything else keeps its published radius, with an assumed size when the server
+    /// has not said; <see cref="AskUnknownSizesAsync"/> asks for the real figure so the guess is
+    /// temporary. Unknown sizes are assumed LARGE: being wrong in that direction costs a wider
+    /// berth around one body, being wrong the other way costs the ship.</para>
     /// </summary>
     private float RadiusOf(SpaceObj o)
     {
+        if (EntityTypes.Of(o.Id) == SpaceEntityType.Planetoid) return PlanetoidColliderRadius;
+
         if (o.Radius > 0) return o.Radius;
 
         return EntityTypes.Of(o.Id) switch
         {
-            SpaceEntityType.Planetoid or SpaceEntityType.Planet => T.PlanetoidAssumedRadius,
+            SpaceEntityType.Planet => T.PlanetoidAssumedRadius,
             SpaceEntityType.Asteroid => T.AsteroidAssumedRadius,
             _ => 0f,
         };
@@ -539,10 +594,10 @@ public sealed partial class FarmBot
             SpaceEntityType.Asteroid =>
                 r * AsteroidColliderFactor + Math.Max(T.AsteroidCollisionMargin, MyRadius),
 
-            // Proportional, because a planetoid's published radius is the one figure that is
-            // definitely not conservative, and hitting one is not a scrape.
+            // The 900u is exact — the server's own collider, not an estimate — so the margin
+            // only has to cover our hull and the steering slop, same as a rock's does.
             SpaceEntityType.Planetoid =>
-                r * T.PlanetoidClearanceFactor + Math.Max(T.PlanetoidCollisionMargin, MyRadius * 2f),
+                r + Math.Max(T.PlanetoidCollisionMargin, MyRadius * 2f),
 
             _ => r + SafetyMargin,
         };
@@ -588,6 +643,12 @@ public sealed partial class FarmBot
     /// a fact about the server, and pretending a rock is bigger than the thing that can hit us is
     /// what the margin is for.</summary>
     private const float AsteroidColliderFactor = 0.9f;
+
+    /// <summary>Every planetoid's collider is a 900u sphere at its centre — the same 900 for all
+    /// of them, hard-coded in bsgocore <c>SpaceObjectFactory.createPlanetoid</c>. Not a tunable
+    /// for the same reason as the factor above: the wire carries no honest alternative (its
+    /// "radius" is a model scale factor), and this is the number the server actually tests.</summary>
+    private const float PlanetoidColliderRadius = 900f;
 
     /// <summary>
     /// Room to leave around a solid body, on top of its own radius.
@@ -877,7 +938,7 @@ public sealed partial class FarmBot
     ///
     /// <para><b>Asteroids only.</b> The angle test measures how far off the nose the obstacle's
     /// edge sits, which is a fair proxy for a rock and badly wrong for anything large: a planetoid
-    /// with a 2,375u clearance sphere 500u ahead subtends about 39 degrees, so at 22 degrees a
+    /// with a 1,000u-plus clearance sphere 500u ahead subtends tens of degrees, so at 22 degrees a
     /// second the test concludes the turn fits in under two seconds and skips the brake. Clearing
     /// a sphere that size means <em>holding</em> the turn across thousands of units while still
     /// closing, and time is precisely what braking buys. Planetoids, planets, stations and ships
@@ -976,6 +1037,9 @@ public sealed partial class FarmBot
     /// </summary>
     private async Task RunInDirection(Vector3 want, DateTime now)
     {
+        // Running has no target to dive after, so nothing is transparent out here.
+        _diveThrough = 0;
+
         // Running is the fastest the ship ever goes, so the room it reserves to turn and stop has
         // to be sized for the boosted speed, not the throttle number.
         var gear = T.UseBoost && BoostSpeed > 0f ? Gear.Boost : Gear.Regular;
@@ -1260,65 +1324,6 @@ public sealed partial class FarmBot
             })
             .OrderBy(o => _world.DistanceToMe(o) ?? float.MaxValue)
             .FirstOrDefault();
-    }
-
-    /// <summary>
-    /// The measured half of the diagnostics: what the ship actually earns, as opposed to what
-    /// the item cards say it should. Every line here is silent until it has real data behind it,
-    /// because a made-up number is worse than a missing one.
-    /// </summary>
-    private void AddMeterLines(List<string> lines, List<Weapon> mineGuns, DateTime now)
-    {
-        lines.Add("");
-
-        string regen = Meter.Regen is { } r
-            ? $"{r:F2}/sec measured over {Meter.RegenSampleSeconds:F0}s of quiet"
-            : $"measuring… ({Meter.RegenSampleSeconds:F0}s so far — needs the guns off)";
-        lines.Add($"power regen    {regen}");
-
-        var cap = Meter.Capacity(mineGuns, _world);
-        if (cap is not null)
-        {
-            lines.Add($"mining draw    {cap.Guns} gun(s), {cap.DrawPerSecond:F1} power/sec, "
-                    + $"{cap.RawDamagePerSecond:F1} dmg/sec if power were free");
-            if (cap.SustainedDamagePerSecond is { } sus)
-            {
-                string verdict = cap.PowerLimited
-                    ? $"POWER-LIMITED — recharge feeds {cap.SustainableGuns:F1} of {cap.Guns} gun(s)"
-                    : "not power-limited — the guns are the ceiling";
-                lines.Add($"mining rate    {sus:F1} dmg/sec sustained "
-                        + $"({cap.DamagePerPower:F2} dmg per power) — {verdict}");
-            }
-        }
-        else if (mineGuns.Count > 0)
-        {
-            lines.Add("mining draw    slot stats haven't published cost/cooldown yet");
-        }
-
-        double tracked = Meter.TotalTrackedSeconds;
-        if (tracked > 5)
-            lines.Add($"time split     {Meter.FractionIn(MiningActivity.Firing):P0} firing, "
-                    + $"{Meter.FractionIn(MiningActivity.Travelling):P0} travelling, "
-                    + $"{Meter.FractionIn(MiningActivity.Holding):P0} holding, "
-                    + $"{Meter.FractionIn(MiningActivity.Idle):P0} idle "
-                    + $"(over {tracked / 60.0:F1} min)");
-
-        long total = Meter.TotalGained;
-        if (total > 0)
-        {
-            var span = Meter.Elapsed(now);
-            string ore = Meter.MinedPerHour(now) is { } mph ? $"{mph:F0} ore/hour" : "…";
-            lines.Add($"mined          {Meter.MinedGained} units in {span.TotalMinutes:F1} min "
-                    + $"= {ore}   <-- the hull comparison number");
-            if (total != Meter.MinedGained)
-                lines.Add($"banked         {total} units total (includes loot and non-ore)");
-            foreach (var (guid, count) in Meter.AllGained().Take(5))
-                lines.Add($"                 {NameResource(guid)} {count}");
-        }
-        else
-        {
-            lines.Add("mined          nothing yet — waiting on the first HoldItems from the server");
-        }
     }
 
     /// <summary>Drops what we believe about the server's throttle without touching the wire —

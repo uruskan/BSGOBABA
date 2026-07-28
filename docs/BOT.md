@@ -328,7 +328,7 @@ range spanning two orders of magnitude:
 | Body | Clearance | Why |
 |---|---|---|
 | Asteroid | `radius × 0.9 + max(AsteroidCollisionMargin 40, our hull)` | the server builds an asteroid's collider as `radius × 0.9` (`SpaceObjectFactory.createAsteroid`), so the published radius is already generous; the margin only has to cover our own hull |
-| Planetoid | `radius × 1.25 + max(PlanetoidCollisionMargin 500, our hull × 2)` | there are few of them, none are on the way to anything, and we arrive at cruise |
+| Planetoid | `900 + max(PlanetoidCollisionMargin 120, our hull × 2)` | the server's collider is a **fixed 900u sphere** for every planetoid; the wire radius is a model scale factor, not a size — see the planetoid section below |
 | Everything else | `radius + max(CollisionMargin 70, our hull)` | ships, stations, debris |
 
 **"Our hull" is measured, not published.** `Reply.WhoIs` carries a radius for asteroids,
@@ -367,6 +367,49 @@ than the hardpoints, treat the number as meaningless.
 The `× 2` above was calibrated when that number was always ~35, so `35 × 2` landed on the 70u the
 margin already defaulted to and the term never bit. With a real half-size it does, and one radius
 is what the geometry asks: a hull rotating on the spot sweeps a sphere of its own half-length.
+
+### Planetoids — a fixed 900u wall, and when to dive through it
+
+Three facts from the server and client sources, each carrying a prediction that the logs can
+falsify. If flying near planetoids goes wrong again, check these first — one of them being wrong
+for this server build is the likely cause.
+
+**1. Every planetoid's collider is a 900u sphere at its centre.** Hard-coded in bsgocore
+`SpaceObjectFactory.createPlanetoid`: `new SphereCollider(transform, zero, 900)` — the same 900
+whatever the body looks like. The visible surface is the *model*, scaled by the wire "radius"
+(see 2), so what you can fly through on screen and what stops you were never going to match.
+*Prediction: the ship is stopped at ~900u from a planetoid's centre and nowhere else. A grind at
+some other centre distance means this constant is wrong.*
+
+**2. The radius on the wire is a scale factor, not a size.** Client `Planetoid.Read` feeds it
+straight into `localScale` — it is a number like 0.8, and treating it as units is what produced
+the old `Inside Planetoid #0E000007's clearance (501u)` lines: a clearance of half the real
+wall, so the bot ground against "empty" space. `RadiusOf` now ignores it for planetoids and uses
+the 900 constant. *Prediction: every planetoid dodge log now quotes a clearance of 900 + margin
+(~1,020u on a strike hull, more on a line hull). A 501u figure coming back means the constant
+stopped being applied.*
+
+**3. Hitting a planetoid costs nothing but time.** `CollisionResolution` has **no damage path**
+for ship × planetoid — contact answers with a `PulseManeuver` shove along the surface normal,
+rate-limited to once a second (10 ticks) and capped at `boostSpeed × 4`. A ship that keeps its
+throttle open out-pushes a once-a-second pulse more often than not — which is why the old bot
+got inside "3/5 of the time" by accident. *Prediction: diving costs zero hull. Hull dropping on
+planetoid contact means this is wrong and diving must stop.*
+
+Two behaviours follow:
+
+- **Navigation** treats the planetoid as the 900u sphere plus a rock-sized margin — no more
+  oversized 1,500u+ guesses, no more undersized 501u ones. Braking stays unconditional for
+  planetoids (the turn-fits test is a fair proxy for a rock and badly wrong for a body this
+  size).
+- **A rock inside the sphere is dived for, on purpose** (`TargetBuriedIn` / `_diveThrough`).
+  Rocks do spawn inside planetoids, and a target inside the clearance sphere is one the
+  avoidance can never reach — the direct line always ends in the no-go zone, so the ship orbits
+  the wall until the watchdog skips a perfectly minable rock. Since contact is free (fact 3),
+  the honest answer is to make that one planetoid transparent — no dodge, no escape — and keep
+  the throttle open. The log says `... sits inside Planetoid #...'s collider — diving straight
+  in`. The 30s approach watchdog stays armed as the backstop for when the shove wins anyway;
+  fleeing (`RunInDirection`) never dives.
 
 ### Collisions are worth costing, not always avoiding
 
@@ -747,8 +790,7 @@ Repair in hangar · Fallback reach · Retreat at hull · Hold off rock · Mine (
 | `AsteroidStandoff` | 120 | gap to a rock's **surface** (its radius is added on top) |
 | `CollisionMargin` | 70 | clearance on top of a **ship's or station's** radius, floored by 2× our own hull |
 | `AsteroidCollisionMargin` | 40 | clearance on top of `radius × 0.9` for a rock, floored by our own hull |
-| `PlanetoidCollisionMargin` | 500 | clearance on top of a planetoid's scaled radius |
-| `PlanetoidClearanceFactor` | 1.25 | how much of a planetoid's published radius counts as solid |
+| `PlanetoidCollisionMargin` | 120 | clearance on top of the fixed 900u planetoid collider, floored by 2× our own hull |
 | `StandoffMargin` | 1.15 | park this far outside the clearance sphere, never on it |
 | `PlanetoidStandoff` | 1200 | hold distance from a planetoid |
 | `SelfPositionTrustSeconds` | 4 | how old a position fix may be before arrival is re-confirmed |

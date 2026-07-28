@@ -231,6 +231,36 @@ public static class PlayerOp
 /// in the sector, so these replies stream past the proxy for free — which is where real
 /// player names come from. Nothing in Reply.WhoIs carries a name.
 /// </summary>
+public static class SceneOp
+{
+    public enum Reply : ushort
+    {
+        /// <summary>The server telling the client which level to load next. For a space level
+        /// the payload names the sector id — the only place our own sector is ever stated.</summary>
+        LoadNextScene = 1,
+        DisconnectTimer = 2,
+        Disconnect = 100,
+    }
+}
+
+/// <summary>Client <c>GameLocation</c> — the second byte of Scene/LoadNextScene.</summary>
+public enum GameLocation : byte
+{
+    Unknown = 0,
+    Space = 1,
+    Room = 2,
+    Story = 3,
+    Disconnect = 4,
+    Arena = 5,
+    BattleSpace = 6,
+    Tournament = 7,
+    Tutorial = 8,
+    Teaser = 9,
+    Avatar = 10,
+    Starter = 11,
+    Zone = 12,
+}
+
 public static class SubscribeOp
 {
     public enum Reply : ushort
@@ -339,6 +369,9 @@ public enum ObjectStat : ushort
     PowerRecovery = 36,
     DradisRange = 37,
     MapRange = 38,
+    /// <summary>How far one FTL jump reaches, in galaxy-map units. The client's CanJump test
+    /// compares this directly against the star-to-star distance, no scaling.</summary>
+    FtlRange = 41,
     OptimalRange = 46,
     MaxRange = 47,
     MinRange = 48,

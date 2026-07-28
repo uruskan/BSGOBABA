@@ -151,6 +151,18 @@ public sealed class GameActions(GameProxy proxy)
     public Task CancelDocking() => proxy.InjectAsync(Msg(GameOp.Request.CancelDocking));
 
     /// <summary>
+    /// Ask for an FTL jump to a sector. Client: <c>GameProtocol.RequestFTLJump</c> — one uint32,
+    /// the sector id off the galaxy map. Everything after it is the server's: it runs the charge
+    /// timer, takes the tylium, and answers with NotEnoughTylium or a refusal if it will not.
+    /// </summary>
+    public Task FtlJump(uint sectorId)
+    {
+        var w = Msg(GameOp.Request.Jump);
+        w.Write(sectorId);
+        return proxy.InjectAsync(w);
+    }
+
+    /// <summary>
     /// "I have loaded the sector, put my ship in it." The client sends this from
     /// <c>SpaceLevel.Preload</c>, once every card of every object already in the sector has
     /// arrived — never from a hangar. See <see cref="LeaveRoom"/> for undocking.

@@ -89,6 +89,12 @@ public sealed class CatalogueSpy
     public ShipListCardInfo? ShipList(uint guid) => _shipLists.TryGetValue(guid, out var c) ? c : null;
     public OwnerCardInfo? Owner(uint guid) => _owners.TryGetValue(guid, out var c) ? c : null;
 
+    /// <summary>The star map, or null until its card has been seen. One per server.</summary>
+    public GalaxyMapCardInfo? GalaxyMap { get; private set; }
+
+    /// <summary>Notes that the star map is wanted. Cheap: it is a single cached card.</summary>
+    public void WantGalaxyMap() => Want(RootCards.GalaxyMap, CardView.GalaxyMap);
+
     public bool Has(uint guid, CardView view) => _raw.ContainsKey(new CardKey(guid, view));
 
     public IReadOnlyCollection<ShipCardInfo> AllShips => _ships.Values.ToList();
@@ -152,6 +158,7 @@ public sealed class CatalogueSpy
                 CardView.ShipSystem => CardReader.ReadShipSystem(key.Guid, r),
                 CardView.ShipList => CardReader.ReadShipList(key.Guid, r),
                 CardView.Owner => CardReader.ReadOwner(key.Guid, r),
+                CardView.GalaxyMap => CardReader.ReadGalaxyMap(key.Guid, r),
                 _ => null,
             };
         }
@@ -213,6 +220,10 @@ public sealed class CatalogueSpy
                 _shipLists[key.Guid] = card;
                 foreach (var g in card.ShipCardGuids) Want(g, CardView.Ship);
                 foreach (var g in card.UpgradeShipCardGuids) Want(g, CardView.Ship);
+                break;
+
+            case GalaxyMapCardInfo card:
+                GalaxyMap = card;
                 break;
         }
 

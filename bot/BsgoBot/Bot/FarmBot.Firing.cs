@@ -151,17 +151,12 @@ public sealed partial class FarmBot
             }
 
             // Not clamped to weapon reach: a planetoid is worked by ordering a mining ship, not by
-            // shooting it, so there is nothing to stay in range of. It IS floored by the body's
-            // own size, because the configured number is a flat 1200u and planetoids are not all
-            // smaller than that — holding at 1200u from the centre of something with a 2000u
-            // radius is not a standoff, it is a stated intention to fly into it.
+            // shooting it, so there is nothing to stay in range of. Floored by the same clearance
+            // the collision code uses — the 900u collider plus margin — so the approach cannot
+            // ask for a hold position the avoidance considers a collision, which is a standoff
+            // and a dodge pulling against each other for as long as the bot is pointed at it.
             case SpaceEntityType.Planetoid when T.PlanetoidStandoff > 0:
-                // The same clearance the collision code uses, so the approach cannot ask for a
-                // hold position the avoidance considers a collision — which is a standoff and a
-                // dodge pulling against each other for as long as the bot is pointed at it.
-                return target.Radius > 0
-                    ? Math.Max(T.PlanetoidStandoff, ClearanceOf(target))
-                    : T.PlanetoidStandoff;
+                return Math.Max(T.PlanetoidStandoff, ClearanceOf(target));
         }
 
         // Closing inside the optimal band only buys anything against something that manoeuvres.

@@ -23,7 +23,8 @@ public static class CardReader
     /// <summary>Views this class knows how to decode. Anything else is still cached raw.</summary>
     public static bool CanParse(CardView view) => view is
         CardView.Ship or CardView.World or CardView.ShipAbility or
-        CardView.ShipSystem or CardView.ShipList or CardView.Owner;
+        CardView.ShipSystem or CardView.ShipList or CardView.Owner or
+        CardView.GalaxyMap;
 
     /// <summary>Client <c>OwnerCard.Read</c>. Three fields, six bytes.</summary>
     public static OwnerCardInfo ReadOwner(uint guid, BgoReader r)
@@ -227,6 +228,48 @@ public static class CardReader
             guid, level, maxLevel, nextCard, slotType, tier,
             shipRestrictions, roleRestrictions, skillHashes, abilityGuids,
             staticBuffs, multiplyBuffs, durability);
+    }
+
+    // ---------------------------------------------------------------- GalaxyMap
+
+    /// <summary>
+    /// Client <c>GalaxyMapCard.Read</c>. The tail — tier list, RCP scaling multipliers — is
+    /// consumed but not kept: it prices sector control, and the bot only needs the geometry.
+    /// </summary>
+    public static GalaxyMapCardInfo ReadGalaxyMap(uint guid, BgoReader r)
+    {
+        int n = r.ReadLength();
+        var stars = new List<MapStarInfo>(n);
+        for (int i = 0; i < n; i++)
+        {
+            // MapStarDesc.Read, field for field.
+            uint id = r.ReadUInt32();
+            float x = r.ReadSingle();
+            float y = r.ReadSingle();
+            byte guiIndex = r.ReadByte();
+            byte faction = r.ReadByte();
+            short colonialThreat = r.ReadInt16();
+            short cylonThreat = r.ReadInt16();
+            uint sectorGuid = r.ReadGuid();
+            bool canColonialOutpost = r.ReadBoolean();
+            bool canCylonOutpost = r.ReadBoolean();
+            r.ReadBoolean();                  // CanColonialJumpBeacon
+            r.ReadBoolean();                  // CanCylonJumpBeacon
+            stars.Add(new MapStarInfo(id, x, y, guiIndex, faction, colonialThreat, cylonThreat,
+                                      sectorGuid, canColonialOutpost, canCylonOutpost));
+        }
+
+        int tiers = r.ReadLength();
+        for (int i = 0; i < tiers; i++) r.ReadUInt16();
+        r.ReadInt32();                        // BaseScalingMultiplier
+        ushort scalings = r.ReadUInt16();
+        for (int i = 0; i < scalings; i++)
+        {
+            r.ReadInt32();                    // rcpDifference
+            r.ReadInt32();                    // multiplier
+        }
+
+        return new GalaxyMapCardInfo(guid, stars);
     }
 
     // ---------------------------------------------------------------- ShipList

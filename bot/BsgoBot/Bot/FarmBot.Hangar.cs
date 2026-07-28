@@ -250,6 +250,8 @@ public sealed partial class FarmBot
         _respawnAnswered = DateTime.MinValue;
         _launchAsks = 0;
         _lastLaunchAsk = DateTime.MinValue;
+        _clientJumpInAt = DateTime.MinValue;
+        _spawnWaitFailures = 0;
         _repairAsked = false;
         _repairWarned = false;
         _conditionBeforeRepair = null;
@@ -381,6 +383,18 @@ public sealed partial class FarmBot
         // that is the "waiting for the handshake" case, not a docked one.
         if (_world.MyPlayerId == 0) return false;
 
+        // No client, no session, nothing to launch. The player id alone is not proof of a live
+        // session — it is seeded from the profile and survives a disconnect — and a launch ask
+        // injected while the next session is still logging in gets it killed by the server in 0s
+        // (twice on 2026-07-28). Emptying _hangarSince here makes the undock delay count from the
+        // moment the new session is actually relaying, which buys the handshake its room.
+        if (!_proxy.ClientConnected)
+        {
+            _hangarSince = null;
+            if (T.AutoUndock && Enabled) { Status = "Waiting for the game client"; return true; }
+            return false;
+        }
+
         var now = DateTime.UtcNow;
         _hangarSince ??= now;
 
@@ -394,10 +408,19 @@ public sealed partial class FarmBot
             // of our own; anything else lands us anchored inside another player's ship, which is
             // a state the bot cannot farm from, cannot leave without their say-so, and used to
             // fly around inside. Taking offer[0] blindly is how we ended up in a Brimir.
-            var pick = offer.FirstOrDefault(o => o.CarrierPlayerId == 0, offer[0]);
+            //
+            // Among the stations, the target sector wins outright: respawning straight into it
+            // costs nothing, where respawning "home" costs the whole jump route back.
+            var pick = offer.FirstOrDefault(
+                           o => o.CarrierPlayerId == 0 && T.TargetSectorId != 0
+                             && o.SectorId == T.TargetSectorId,
+                           offer.FirstOrDefault(o => o.CarrierPlayerId == 0, offer[0]));
 
             _respawnOffer = null;
             _respawnAnswered = now;
+            // A fresh death screen outranks a launch in flight: whatever the client was loading,
+            // we are dead again, so any spawn still being waited on is not coming.
+            _clientJumpInAt = DateTime.MinValue;
             await _act.SelectRespawnLocation(pick.SectorId, pick.CarrierPlayerId);
             Log?.Invoke($"Respawning at sector {pick.SectorId}"
                       + (pick.CarrierPlayerId != 0
@@ -415,6 +438,39 @@ public sealed partial class FarmBot
             return true;
         }
 
+        // The client sent its own JumpIn: it left the room and its space level is loaded. From
+        // here the launch is the server's to finish, and everything we could inject — another
+        // Room.Quit, our own JumpIn, a re-answered death screen — lands in a client that is
+        // already in space and only desyncs it. That was the 2026-07-28 crash: the bot kept
+        // launching at a client that had launched, for half an hour, until it died. So: wait.
+        if (_clientJumpInAt != DateTime.MinValue)
+        {
+            double sinceJumpIn = (now - _clientJumpInAt).TotalSeconds;
+            if (sinceJumpIn < SpawnWaitSeconds)
+            {
+                Status = $"Client loaded space — waiting for our ship to spawn ({sinceJumpIn:F0}s)";
+                return true;
+            }
+
+            // The wait ran out with no ship. The launch failed server-side; count it and either
+            // start the sequence over or, when that has plainly stopped working, give up loudly
+            // rather than grind the client down.
+            _clientJumpInAt = DateTime.MinValue;
+            _spawnWaitFailures++;
+            if (_spawnWaitFailures >= MaxSpawnWaitFailures)
+            {
+                Log?.Invoke($"Launch failed {_spawnWaitFailures} times — the client loaded space "
+                          + "but the server never spawned our ship. Giving up; relog and press Go farm.");
+                Stop();
+                return true;
+            }
+
+            _launchAsks = 0;
+            _lastLaunchAsk = DateTime.MinValue;
+            Log?.Invoke($"The client loaded space {SpawnWaitSeconds:F0}s ago but our ship never "
+                      + $"spawned — treating the launch as failed ({_spawnWaitFailures} of {MaxSpawnWaitFailures}).");
+        }
+
         if (await RepairInHangarAsync(now)) return true;
 
         double waited = (now - _hangarSince.Value).TotalSeconds;
@@ -426,7 +482,11 @@ public sealed partial class FarmBot
 
         // Three launches ignored means the server is not refusing to undock us — it still has us
         // dead, and JumpIn is simply the wrong message. Answer the death screen again.
-        if (_launchAsks >= 3 && _lastRespawnOffer is { Count: > 0 }
+        //
+        // Unless the client has already demonstrably loaded space this spell: then "the server
+        // never told the client" is refuted, and a re-sent respawn selection is the one message
+        // proven to wedge a loaded client (2026-07-28, 22:31:32).
+        if (_launchAsks >= 3 && _spawnWaitFailures == 0 && _lastRespawnOffer is { Count: > 0 }
             && (now - _respawnAnswered).TotalSeconds > 45)
         {
             _respawnOffer = _lastRespawnOffer;

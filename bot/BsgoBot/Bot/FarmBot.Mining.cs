@@ -709,7 +709,7 @@ public sealed partial class FarmBot
                  : fired > 0 ? MiningActivity.Firing
                  : MiningActivity.Holding, now);
         string what = KnownContents(rock, DateTime.UtcNow)
-            ? $"{NameResource(rock.ResourceGuid)} x{rock.ResourceCount}"
+            ? $"{NameItem(rock.ResourceGuid)} x{rock.ResourceCount}"
             : rock.Scanned ? "scan stale" : "unscanned";
         string gun = improvised ? "gun(s)" : shooting.Count > lasers.Count ? "slot(s)" : "laser(s)";
         Status = $"Mining #{rock.Id:X8} — {dist:F0}u / {range:F0}u, {what}"

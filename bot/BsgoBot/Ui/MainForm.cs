@@ -22,7 +22,9 @@ public sealed class MainForm : Form
     private readonly LogView _log = new();
     private readonly StatList _link = new();
     private readonly StatList _sector = new();
-    private readonly MonoText _diag = new();
+    private readonly StatList _session = new();
+    private readonly DiagView _diagView = new() { Dock = DockStyle.Fill };
+    private readonly SessionsView _sessionsView = new() { Dock = DockStyle.Fill };
 
     private readonly FlatButton _btnProxy = new();
     private readonly FlatButton _btnFarm = new();
@@ -67,6 +69,7 @@ public sealed class MainForm : Form
     private NumberField _numHull = null!;
     private NumberField _numNpcKeepOut = null!;
     private NumberField _numLocalTravel = null!;
+    private NumberField _numTargetSector = null!;
     private NumberField _numShipClass = null!;
 
     private Panel _header = null!;
@@ -136,6 +139,12 @@ public sealed class MainForm : Form
             _cfg.Save();
         };
 
+        // History lives beside the profile that produced it — bot.json gets bot.sessions.json —
+        // so two instances farming two servers keep separate records.
+        _bot.Sessions.Open(Path.Combine(
+            Path.GetDirectoryName(Config.FilePath) ?? AppContext.BaseDirectory,
+            Path.GetFileNameWithoutExtension(Config.FilePath) + ".sessions.json"));
+
         _proxy.Log += AppendLog;
         _bot.Log += AppendLog;
         _world.Log += AppendLog;
@@ -168,6 +177,9 @@ public sealed class MainForm : Form
 
         FormClosing += (_, _) =>
         {
+            // Closes the live session record with a real end time; without this a run cut
+            // short by closing the window reads as a crash on the next load.
+            if (_bot.Enabled) _bot.Stop();
             SaveWeapons();
             _cfg.Save();
             _catcher.Stop();
@@ -635,6 +647,13 @@ public sealed class MainForm : Form
         _numLocalTravel.ValueChanged += (_, _) =>
             _bot.T.LocalTravelSeconds = _cfg.Tuning.LocalTravelSeconds = _numLocalTravel.Value;
 
+        // Where the farm belongs. 0 farms wherever the ship finds itself; any other value makes
+        // a respawn or undock in the wrong sector jump back before farming. The id is on the
+        // sector card in the log — it is announced on every dock, jump and respawn.
+        _numTargetSector = new NumberField(0, 1_000_000, 1, (int)_cfg.Tuning.TargetSectorId, "");
+        _numTargetSector.ValueChanged += (_, _) =>
+            _bot.T.TargetSectorId = _cfg.Tuning.TargetSectorId = (uint)_numTargetSector.Value;
+
         // 0 reads it from the hull card. Only used to pick how much bigger than its own gun
         // spread the hull is assumed to be — a line ship is mostly hull with a few guns on it.
         _numShipClass = new NumberField(0, 4, 1, _cfg.Tuning.ShipTierOverride, "");
@@ -667,8 +686,8 @@ public sealed class MainForm : Form
 
         // The chip row must fit ALL of them, or the last is silently clipped off the bottom.
         // Three resources at two per rail-width is two rows of 30, with room for a fourth.
-        // Caption, chip block, then one row per label/field pair. Ten pairs now.
-        int[] heights = [18, 62, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30];
+        // Caption, chip block, then one row per label/field pair. Twelve pairs now.
+        int[] heights = [18, 62, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30];
         _tuningHeight = CardHeight(heights);
 
         card.Controls.Add(Rows(2, heights,
@@ -686,6 +705,7 @@ public sealed class MainForm : Form
             (RailCaption("KEEP OFF GUNS"), 1), (_numKeepOut, 1),
             (RailCaption("KEEP OFF NPCS"), 1), (_numNpcKeepOut, 1),
             (RailCaption("LOCAL TRAVEL"), 1), (_numLocalTravel, 1),
+            (RailCaption("TARGET SECTOR"), 1), (_numTargetSector, 1),
             (RailCaption("CRUISE SPEED"), 1), (_numSpeed, 1),
             (RailCaption("BOOST SPEED"), 1), (_numBoost, 1),
             (RailCaption("FALLBACK REACH"), 1), (_numRange, 1)));
@@ -766,14 +786,20 @@ public sealed class MainForm : Form
         var kitHost = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Bg, Padding = new Padding(7, 4, 7, 5) };
         kitHost.Controls.Add(_loadout);
 
+        var diagHost = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Bg, Padding = new Padding(7, 4, 7, 5) };
+        diagHost.Controls.Add(_diagView);
+
+        var sessionsHost = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Bg, Padding = new Padding(7, 4, 7, 5) };
+        sessionsHost.Controls.Add(_sessionsView);
+
         _viewHost = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Bg };
-        _viewHost.Controls.AddRange([listHost, kitHost, mapHost]);
+        _viewHost.Controls.AddRange([listHost, kitHost, mapHost, diagHost, sessionsHost]);
 
         var logHost = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Bg, Padding = new Padding(7, 0, 7, 10) };
         _log.Dock = DockStyle.Fill;
         logHost.Controls.Add(_log);
 
-        centre.Controls.Add(BuildTabs(mapHost, listHost, kitHost), 0, 0);
+        centre.Controls.Add(BuildTabs(mapHost, listHost, kitHost, diagHost, sessionsHost), 0, 0);
         centre.Controls.Add(_viewHost, 0, 1);
         centre.Controls.Add(logHost, 0, 2);
 
@@ -784,7 +810,8 @@ public sealed class MainForm : Form
         return centre;
     }
 
-    private Control BuildTabs(Control map, Control list, Control loadout)
+    private Control BuildTabs(Control map, Control list, Control loadout,
+                              Control diagnostics, Control sessions)
     {
         var bar = new FlowLayoutPanel
         {
@@ -812,6 +839,8 @@ public sealed class MainForm : Form
         Tab("Map", map);
         Tab("Contacts", list);
         Tab("Loadout", loadout);
+        Tab("Diagnostics", diagnostics);
+        Tab("Sessions", sessions);
         Show(_cfg.SelectedView);
         return bar;
     }
@@ -910,9 +939,11 @@ public sealed class MainForm : Form
         }
         huntCard.Controls.Add(huntFlow);
 
-        var diagCard = new Card("Diagnostics") { Dock = DockStyle.Fill };
-        _diag.Dock = DockStyle.Fill;
-        diagCard.Controls.Add(_diag);
+        // The full diagnostics moved to their own tab, where they have the width to be read.
+        // What stays on the rail is the one thing worth glancing at constantly: the session.
+        var sessionCard = new Card("Session") { Dock = DockStyle.Fill };
+        _session.Dock = DockStyle.Fill;
+        sessionCard.Controls.Add(_session);
 
         // Zeroing the meter is what makes it an experiment rather than a running total: refit,
         // reset, mine for a while, compare ore/hour against the fit you had before.
@@ -922,13 +953,13 @@ public sealed class MainForm : Form
             _bot.Meter.Reset();
             AppendLog("Mining meter reset — regen, ore/hour and the time split start again.");
         };
-        diagCard.Controls.Add(btnReset);
+        sessionCard.Controls.Add(btnReset);
         btnReset.BringToFront();
 
         rail.Controls.Add(linkCard, 0, 0);
         rail.Controls.Add(sectorCard, 0, 1);
         rail.Controls.Add(huntCard, 0, 2);
-        rail.Controls.Add(diagCard, 0, 3);
+        rail.Controls.Add(sessionCard, 0, 3);
         return rail;
     }
 
@@ -1241,6 +1272,7 @@ public sealed class MainForm : Form
         _numShipClass.Value = t.ShipTierOverride;
         _numNpcKeepOut.Value = (int)t.HostileShipKeepOut;
         _numLocalTravel.Value = (int)t.LocalTravelSeconds;
+        _numTargetSector.Value = (int)t.TargetSectorId;
         _numSpeed.Value = (int)t.TopSpeedOverride;
         _numBoost.Value = (int)t.BoostSpeedOverride;
         _numKeepOut.Value = (int)t.HostileStationKeepOut;
@@ -1533,6 +1565,12 @@ public sealed class MainForm : Form
         ]);
 
         _sector.SetRows([
+            // "?" until a scene change names it — the server only states the sector on a dock,
+            // jump or respawn. The green/plain split is against the farm's target, if one is set.
+            new("sector", _world.CurrentSectorId == 0 ? "?" : $"{_world.CurrentSectorId}",
+                _world.CurrentSectorId == 0 ? Theme.Faint
+                : _bot.T.TargetSectorId == 0 ? Theme.Text
+                : _world.CurrentSectorId == _bot.T.TargetSectorId ? Theme.Good : Theme.Warn),
             new("objects", $"{objs.Count:N0}"),
             new("located", $"{located:N0}", located == 0 ? Theme.Faint : Theme.Text),
             new("hostiles", $"{hostiles:N0}", hostiles > 0 ? Theme.Bad : Theme.Faint),
@@ -1545,18 +1583,55 @@ public sealed class MainForm : Form
             new("loot taken", $"{_bot.LootTaken:N0}", _bot.LootTaken > 0 ? Theme.Good : Theme.Faint),
         ]);
 
-        // Gated like everything below it, and for the same reason — this one was simply missed.
-        // Diagnostics() walks the sector several times over and formats fifty-odd lines; doing
-        // that four times a second for a panel that is not on screen is the single most
-        // expensive thing the UI thread was doing.
-        if (_diag.Visible) _diag.SetText(_bot.Diagnostics());
+        RefreshSessionCard();
         _header.Invalidate();
 
-        // Only the visible view is refreshed. Rebuilding a contacts table nobody is looking at,
-        // four times a second, for a few hundred objects, is work for nothing.
+        // Only the visible view is refreshed. Building fifty-odd diagnostics rows, or a
+        // contacts table nobody is looking at, four times a second, is work for nothing.
         if (_map.Visible) _map.Invalidate();
         if (_contacts.Visible) _contacts.Tick();
         if (_loadout.Visible) _loadout.Tick();
+        if (_diagView.Visible) _diagView.SetSections(_bot.DiagnosticSections());
+        if (_sessionsView.Visible) _sessionsView.SetSessions(_bot.Sessions.All());
+    }
+
+    /// <summary>The rail's at-a-glance answer to "is it earning": the live run, or the last one.</summary>
+    private void RefreshSessionCard()
+    {
+        var now = DateTime.UtcNow;
+        var live = _bot.Sessions.Current;
+        var shown = live ?? _bot.Sessions.All().FirstOrDefault();
+
+        var rows = new List<StatList.Row>
+        {
+            new("state", live is not null ? "farming" : "stopped",
+                live is not null ? Theme.Good : Theme.Faint),
+        };
+
+        if (shown is null)
+        {
+            rows.Add(new("history", "no runs yet", Theme.Faint));
+        }
+        else
+        {
+            rows.Add(new(live is not null ? "started" : "last run",
+                shown.StartedUtc.ToLocalTime().ToString(live is not null ? "HH:mm:ss" : "MMM d HH:mm")));
+            rows.Add(new("ran for", SessionsView.FmtSpan(shown.Duration(now))));
+            rows.Add(new("ore", $"{shown.Mined:N0}", shown.Mined > 0 ? Theme.Text : Theme.Faint));
+            rows.Add(new("ore/hour",
+                shown.OrePerHour(now) is { } oph ? $"{oph:N0}" : "…",
+                Theme.Accent));
+            foreach (var (guid, count) in shown.Gained.OrderByDescending(kv => kv.Value).Take(3))
+                rows.Add(new(_bot.NameItem(guid).ToLowerInvariant(), $"{count:N0}", Theme.Muted));
+            if (shown.Deaths > 0) rows.Add(new("deaths", $"{shown.Deaths}", Theme.Bad));
+        }
+
+        int runs = _bot.Sessions.All().Count(s => !s.Running);
+        rows.Add(new("", "", null, Spacer: true));
+        rows.Add(new("recorded runs", $"{runs}", runs > 0 ? Theme.Text : Theme.Faint));
+        rows.Add(new("meter total", $"{_bot.Meter.MinedGained:N0}", Theme.Muted));
+
+        _session.SetRows(rows);
     }
 
     private void AppendLog(string message)

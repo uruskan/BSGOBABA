@@ -356,17 +356,14 @@ public sealed class BotTuning
     public float AsteroidCollisionMargin { get; set; } = 40f;
 
     /// <summary>
-    /// Room to leave around a planetoid, on top of its scaled radius.
+    /// Room to leave around a planetoid, on top of the server's fixed 900u collider.
     ///
-    /// Deliberately large, and for the opposite reason: there are a handful of them, none of them
-    /// are on the way to anything, and the ship approaches them at cruise. A flat margin that
-    /// suits a 40u rock is a rounding error on a 1,500u body.
+    /// No longer large, because the 900u is no longer a guess: every planetoid's collider is a
+    /// hard-coded 900u sphere (bsgocore SpaceObjectFactory.createPlanetoid), so like a rock's
+    /// margin this only has to cover our own hull and the steering slop. Floored by twice the
+    /// hull half-size in ClearanceOf, so a line ship widens it on its own.
     /// </summary>
-    public float PlanetoidCollisionMargin { get; set; } = 500f;
-
-    /// <summary>How much of a planetoid's published radius to treat as solid. Above 1 because
-    /// nothing about a planetoid's stated size is conservative.</summary>
-    public float PlanetoidClearanceFactor { get; set; } = 1.25f;
+    public float PlanetoidCollisionMargin { get; set; } = 120f;
 
     /// <summary>
     /// Fly through any asteroid whose collision would cost less than this fraction of maximum
@@ -385,12 +382,10 @@ public sealed class BotTuning
     public float IgnoreCollisionHullFraction { get; set; } = 0.05f;
 
     /// <summary>
-    /// Size to assume for a planetoid the server has not published a radius for.
-    ///
-    /// Deliberately large. The radius arrives in a WhoIs body and for scenery it often never
-    /// arrives at all, and the old behaviour on silence was to assume ZERO — which made a body
-    /// two thousand units across into a 500u sphere and flew the ship straight through it.
-    /// Guessing high costs a wider berth around one object; guessing low costs the ship.
+    /// Size to assume for a PLANET the server has not published a radius for. (Planetoids no
+    /// longer use this: their collider is a fixed 900u sphere on the server, whatever the wire
+    /// says.) Deliberately large — guessing high costs a wider berth around one object, guessing
+    /// low costs the ship.
     /// </summary>
     public float PlanetoidAssumedRadius { get; set; } = 1500f;
 
@@ -632,6 +627,17 @@ public sealed class BotTuning
     /// Undock.
     /// </summary>
     public bool AutoUndock { get; set; } = true;
+
+    /// <summary>
+    /// The sector the bot should farm in, or 0 to farm wherever it finds itself.
+    ///
+    /// With a target set, a ship that comes out of a respawn or an undock in any other sector
+    /// travels back before farming: route computed over the galaxy-map card with the ship's own
+    /// FtlRange stat, one hop per jump, however many hops it takes. This is what stops a death
+    /// in an outpost-less sector from quietly moving the farm to wherever the death screen
+    /// dropped us.
+    /// </summary>
+    public uint TargetSectorId { get; set; }
 
     /// <summary>Buy the ship's condition back before launching, with titanium. Dying always costs
     /// condition, and a wrecked hull launches with a fraction of its stats.</summary>

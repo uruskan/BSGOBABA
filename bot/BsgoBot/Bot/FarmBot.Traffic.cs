@@ -14,6 +14,9 @@ public sealed partial class FarmBot
     private void OnSessionStarted()
     {
         _world.Clear();
+        // Hold stacks are keyed by server ids that die with the connection; a new login
+        // restates the hold and must seed a fresh baseline, not count as earnings.
+        _world.ResetHoldTracking();
         Weapons.ResetToggles();
         ForgetThrottle();
         _following = false;
@@ -63,6 +66,12 @@ public sealed partial class FarmBot
     {
         Weapons.ResetToggles();
         Cards.SaveCache();
+
+        // The whole hangar sequence dies with the session. Death screens, launch-ask counters
+        // and spawn waits all describe a connection that no longer exists — and a counter that
+        // survives fires "attempt 2" into the next session's login handshake, which the server
+        // answers by closing it (twice on 2026-07-28, both sessions dead in 0s).
+        ClearHangarState();
         // Only the in-flight bookkeeping: object ids do not survive a session, so pending shots
         // and per-attacker clocks would resolve against strangers. The per-class totals do
         // survive, because a class is the same class next time.
@@ -112,6 +121,9 @@ public sealed partial class FarmBot
         _launchAsks = 0;
         _lastLaunchAsk = DateTime.MinValue;
         _respawnAnswered = DateTime.MinValue;
+        // A removal ends whatever launch the client had loaded, so the spawn wait ends with it.
+        // _spawnWaitFailures stays: it counts the whole wedge, across exactly these restarts.
+        _clientJumpInAt = DateTime.MinValue;
         _repairAsked = false;
         _repairWarned = false;
         _conditionBeforeRepair = null;
@@ -204,6 +216,10 @@ public sealed partial class FarmBot
         _dodgeId = 0; _dodgeSince = DateTime.MinValue;
         _escapeFrom = 0; _escapeSince = DateTime.MinValue;
         _detourSince = DateTime.MinValue;
+
+        // The jump that carried us here has landed; the next travel tick plans the next leg
+        // fresh. The give-up flag stays — a sector change is not what re-arms a refused jump.
+        _hopAsked = 0; _hopAsks = 0; _hopAskedAt = DateTime.MinValue;
     }
 
     /// <summary>Watches both directions: your traffic teaches the bot, the server's builds the map.</summary>
@@ -234,6 +250,12 @@ public sealed partial class FarmBot
                 if (f.Protocol == ProtocolId.Game
                     && (GameOp.Reply)f.MsgType == GameOp.Reply.DockingDelay)
                     NoteDockingDelay(f.Reader().ReadSingle());
+
+                // The one jump refusal the server states outright. The payload (the sector's
+                // card guid) is not needed to act on it, so it stays unread.
+                if (f.Protocol == ProtocolId.Game
+                    && (GameOp.Reply)f.MsgType == GameOp.Reply.NotEnoughTylium)
+                    OnNotEnoughTylium();
 
                 _world.OnServerMessage(f.Protocol, f.MsgType, r);
                 return;
@@ -365,6 +387,9 @@ public sealed partial class FarmBot
             case GameOp.Request.JumpIn:
                 _world.Clear();
                 ForgetSectorState();
+                // Out of the sector, this is the launch succeeding client-side: the hangar
+                // machine must stop asking and let the server finish. See HangarTickAsync.
+                if (_hangarSince is not null) _clientJumpInAt = DateTime.UtcNow;
                 Log?.Invoke("Client sent Game/JumpIn (61) — its space level has finished loading. "
                           + "Dropped the old sector's map and verdicts.");
                 break;

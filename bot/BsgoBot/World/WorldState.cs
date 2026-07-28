@@ -126,6 +126,14 @@ public sealed class WorldState
     /// This is where real weapon ranges and cooldowns come from.</summary>
     private readonly Dictionary<ushort, Dictionary<ObjectStat, float>> _slotStats = new();
 
+    /// <summary>
+    /// The cargo hold as last stated, one stack per server id. Kept because Reply.HoldItems
+    /// restates a stack's running TOTAL (client: Hold._AddItems replaces the stack), so the
+    /// only way to know what a message actually earned is the rise against this.
+    /// </summary>
+    private readonly Dictionary<ushort, LootItem> _holdStacks = new();
+    private DateTime _holdFirstAt = DateTime.MinValue;
+
     /// <summary>Slots the server reported a toggle buff for — i.e. continuous-fire abilities.</summary>
     private readonly HashSet<ushort> _toggleSlots = [];
 
@@ -139,6 +147,19 @@ public sealed class WorldState
 
     /// <summary>My own player id, straight from PlayerProtocol Reply.ID.</summary>
     public uint MyPlayerId { get; private set; }
+
+    /// <summary>
+    /// The sector we are in — or docked over, when the current scene is a room. Stated by
+    /// Scene/LoadNextScene, the message that tells the client which level to load, and the only
+    /// place the server ever names our own sector. Zero until the first scene change flows
+    /// through the proxy, which means a bot attached mid-session does not know its sector until
+    /// the next dock, jump or respawn.
+    /// </summary>
+    public uint CurrentSectorId { get; private set; }
+
+    /// <summary>Raised when LoadNextScene names a sector, after <see cref="CurrentSectorId"/>
+    /// is updated. Fires on every scene change, not only when the sector differs.</summary>
+    public event Action<uint>? SectorIdentified;
 
     /// <summary>Hangar id of the ship I am flying (PlayerProtocol Reply.ActiveShip). Not the
     /// same number as <see cref="MyObjectId"/>, which is the sector object.</summary>
@@ -563,7 +584,48 @@ public sealed class WorldState
             case ProtocolId.Game: OnGame(msgType, r); break;
             case ProtocolId.Player: OnPlayer(msgType, r); break;
             case ProtocolId.Subscribe: OnSubscribe(msgType, r); break;
+            case ProtocolId.Scene: OnScene(msgType, r); break;
         }
+    }
+
+    /// <summary>
+    /// Scene/LoadNextScene, transcribed from the client's <c>SceneProtocol.ParseMessage</c>.
+    /// Only the sector id is kept, and only the locations that state one are parsed — the
+    /// payload's field order differs by location, so each case reads exactly what the client
+    /// reads and nothing after the id.
+    /// </summary>
+    private void OnScene(ushort msgType, BgoReader r)
+    {
+        if ((SceneOp.Reply)msgType != SceneOp.Reply.LoadNextScene) return;
+
+        r.ReadByte();                             // TransSceneType
+        var location = (GameLocation)r.ReadByte();
+
+        uint sector = 0;
+        switch (location)
+        {
+            // Room: GUID cardGuid, then uint32 sectorId — the sector the room's station sits
+            // in, which is why the bot knows its sector even while docked.
+            case GameLocation.Room:
+                r.ReadUInt32();
+                sector = r.ReadUInt32();
+                break;
+
+            // Space and its variants: uint32 sectorId first, then the sector's card guid.
+            case GameLocation.Space:
+            case GameLocation.Story:
+            case GameLocation.BattleSpace:
+            case GameLocation.Tournament:
+            case GameLocation.Tutorial:
+            case GameLocation.Teaser:
+            case GameLocation.Zone:
+                sector = r.ReadUInt32();
+                break;
+        }
+
+        if (sector == 0) return;
+        CurrentSectorId = sector;
+        SectorIdentified?.Invoke(sector);
     }
 
     private void OnGame(ushort msgType, BgoReader r)
@@ -781,10 +843,25 @@ public sealed class WorldState
             // What actually reached the hold. Everything else about yield is inference —
             // a scan says what a rock holds, not what we got out of it, and another player
             // can break the rock we were shooting. This is the server stating the answer.
+            //
+            // The catch: each entry carries the stack's running TOTAL, not the amount added.
+            // Passing the raw counts downstream is how "mined" reached nine digits — a hold
+            // carrying 200k tylium re-counted on every restatement. HoldDelta turns the
+            // message into genuine gains before anyone accumulates it.
             case PlayerOp.Reply.HoldItems:
             {
-                var items = ReadItemList(r);
-                if (items.Count > 0) HoldGained?.Invoke(items);
+                var gained = HoldDelta(ReadItemList(r));
+                if (gained.Count > 0) HoldGained?.Invoke(gained);
+                break;
+            }
+
+            // Stacks leaving the hold — an unload at a base, mostly. Not a negative gain,
+            // but the snapshot must forget them, or the replacement stack the next mining
+            // run creates under a fresh id would be measured against a ghost.
+            case PlayerOp.Reply.RemoveHoldItems:
+            {
+                var ids = r.ReadUInt16List();
+                lock (_gate) foreach (var id in ids) _holdStacks.Remove(id);
                 break;
             }
 
@@ -1318,6 +1395,51 @@ public sealed class WorldState
     }
 
     // ---------------------------------------------------------------- item helpers
+
+    /// <summary>
+    /// Converts a HoldItems restatement into what was actually GAINED, as per-item rises
+    /// against the last known stack. The first messages after a login describe cargo carried
+    /// in, not cargo earned, so everything inside the seed window only sets the baseline —
+    /// mining cannot plausibly land anything that soon after a connect.
+    /// </summary>
+    private const double HoldSeedSeconds = 5.0;
+
+    private List<LootItem> HoldDelta(List<LootItem> items)
+    {
+        var now = DateTime.UtcNow;
+        var gained = new List<LootItem>();
+        lock (_gate)
+        {
+            if (_holdFirstAt == DateTime.MinValue) _holdFirstAt = now;
+            bool seeding = (now - _holdFirstAt).TotalSeconds < HoldSeedSeconds;
+            foreach (var it in items)
+            {
+                long before = _holdStacks.TryGetValue(it.ServerId, out var known) ? known.Count : 0;
+                _holdStacks[it.ServerId] = it;
+                if (seeding) continue;
+                long rise = it.Count - before;
+                if (rise > 0) gained.Add(it with { Count = (uint)rise });
+            }
+        }
+        return gained;
+    }
+
+    /// <summary>Forget the hold baseline. For a NEW connection only: server ids do not survive
+    /// a login, so measuring the next session's hold against them would invent yield.</summary>
+    public void ResetHoldTracking()
+    {
+        lock (_gate)
+        {
+            _holdStacks.Clear();
+            _holdFirstAt = DateTime.MinValue;
+        }
+    }
+
+    /// <summary>The hold as last stated by the server, one entry per stack.</summary>
+    public List<LootItem> HoldSnapshot()
+    {
+        lock (_gate) return _holdStacks.Values.ToList();
+    }
 
     /// <summary>ItemFactory.ReadItem — a tag byte then a fixed body per type.</summary>
     private static (ItemType Type, uint CardGuid, uint Count) ReadItem(BgoReader r)

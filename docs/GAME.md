@@ -250,6 +250,19 @@ systems.
 Cost: a mining ship **appears on the sector map for both factions**, and destroying it is a daily
 assignment. It is a PvP magnet by design. Asteroid mining is invisible and safer.
 
+### Planetoid collision — three server facts
+
+- **The collider is a fixed 900u sphere**, the same for every planetoid, hard-coded in
+  `SpaceObjectFactory.createPlanetoid` (`new SphereCollider(..., 900)`). The visible body is the
+  model scaled by the wire "radius", so the solid part never matches what is drawn.
+- **The wire radius is a scale factor, not a size.** Client `Planetoid.Read` feeds it into
+  `localScale`; values run around 1. Never use it as units.
+- **Contact deals no damage.** `CollisionResolution` has no ship × planetoid damage path — only a
+  `PulseManeuver` shove along the surface normal, once a second (10-tick limit), force capped at
+  `boostSpeed × 4`. A ship holding its throttle open can push through the wall; asteroids DO
+  spawn inside it (the resource spawner has no exclusion for the collider), which is why the bot
+  deliberately dives for buried rocks (BOT.md, planetoid section).
+
 ### Sector threat level
 
 Higher threat = bigger rocks, more resources, nastier NPCs. Threat 20 is the richest; 1–10 is
