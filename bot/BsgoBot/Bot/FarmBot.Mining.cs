@@ -589,8 +589,16 @@ public sealed partial class FarmBot
         if (await ConfirmPositionAsync(now)) return;
 
         // A rock doesn't dodge, but accuracy still falls off past optimal range — close in.
+        //
+        // In range is not the same as able to shoot. Every weapon has a firing arc, and a rock
+        // abeam of a hull that has already stopped is refused by the server in silence — which the
+        // stall watchdog then read as the rock being gone. Holding station has to mean holding the
+        // nose on it as well, so an out-of-arc rock keeps steering: SteerToward at the standoff we
+        // are already sitting at turns the ship without driving it anywhere.
         bool closing = T.AutoApproach && dist > preferred;
-        if (closing) await SteerToward(rock, preferred);
+        bool offBeam = !closing && TargetOutOfArc(rock) is not null;
+
+        if (closing || offBeam) await SteerToward(rock, offBeam ? dist : preferred);
         else await StopThrottleIfMoving();
 
         // Locking does NOT scan: the server's LockTarget handler only records the target id.

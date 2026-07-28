@@ -1056,11 +1056,30 @@ public sealed class WorldState
         }
     }
 
+    /// <summary>
+    /// Which way our nose points, independent of whether we are moving.
+    ///
+    /// Facing used to be inferred from the velocity vector, which is fine while under way and
+    /// useless the moment the ship stops — and stopped is exactly the state mining is done in.
+    /// The server enforces a firing arc per weapon (Algorithm3D.isWeaponPositionInRange takes the
+    /// ability's Angle), so a bot that cannot say where its nose is cannot tell an out-of-arc
+    /// target from a rock that is not there. It concluded the latter and threw the rock away.
+    ///
+    /// Zero until a heading has been seen at all.
+    /// </summary>
+    public Vector3 MyFacing { get; private set; }
+
     /// <summary>Turns an Euler3 heading + march speed into a velocity estimate.</summary>
     private void SetHeading(uint id, Vector3 euler, float speed)
     {
-        var v = Forward(euler) * speed;
-        SetVelocity(id, v);
+        var forward = Forward(euler);
+        if (id == MyObjectId || (_objects.TryGetValue(id, out var o) && o.IsMe))
+        {
+            // Kept whatever the speed. A Rest maneuver states a heading with a march speed of
+            // zero, and that is still a statement about where the ship is pointing.
+            lock (_gate) MyFacing = forward;
+        }
+        SetVelocity(id, forward * speed);
     }
 
     private void SetVelocity(uint id, Vector3 v)

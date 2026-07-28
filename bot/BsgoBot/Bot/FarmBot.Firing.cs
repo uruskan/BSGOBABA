@@ -370,6 +370,38 @@ public sealed partial class FarmBot
         return null;
     }
 
+    /// <summary>
+    /// How far off the nose a target sits when that is more than the mining weapons will bear, or
+    /// null when it is inside the arc (or we have no way to tell).
+    ///
+    /// The narrowest fitted arc decides it: a set of guns is only pointed at something when all of
+    /// them can see it, and the widest would otherwise excuse the rest sitting idle. Half the card
+    /// Angle either side of the nose, which is what the server measures against.
+    ///
+    /// Silent about it when the arc or our own facing is unknown. Turning the ship on a guess is
+    /// how a bot spends a session spinning next to a rock it could already hit.
+    /// </summary>
+    private float? TargetOutOfArc(SpaceObj target)
+    {
+        var facing = _world.MyFacing;
+        if (facing.LengthSquared() < 0.01f) return null;
+
+        var (guns, _) = MiningWeapons();
+        var arcs = guns.Where(w => w.CardAngle is > 0 and < 360f)
+                       .Select(w => w.CardAngle!.Value)
+                       .ToList();
+        if (arcs.Count == 0) return null;
+
+        var toTarget = target.PredictedPosition(DateTime.UtcNow) - _world.MyPosition;
+        if (toTarget.LengthSquared() < 1f) return null;
+
+        float degrees = MathF.Acos(Math.Clamp(
+            Vector3.Dot(Vector3.Normalize(facing), Vector3.Normalize(toTarget)), -1f, 1f))
+            * (180f / MathF.PI);
+
+        return degrees > arcs.Min() / 2f ? degrees : null;
+    }
+
     /// <summary>Abilities that are meant to be pointed at an enemy. Everything else — buffs,
     /// repairs, flares, stealth, scanners — is either self-targeted or has its own trigger.</summary>
     private static bool IsOffensive(AbilityActionType a) => a is
@@ -651,6 +683,23 @@ public sealed partial class FarmBot
         }
 
         if ((now - _mineProgressAt).TotalSeconds < T.MiningStallSeconds) return false;
+
+        // Before condemning it: is it simply off the beam? Every weapon has a firing arc the
+        // server enforces (Algorithm3D.isWeaponPositionInRange takes the ability's Angle), and an
+        // out-of-arc cast is refused in the same total silence as a cast at a rock that no longer
+        // exists. The two are indistinguishable from the reply, so they used to be treated as one
+        // — and a perfectly good rock 500u off the starboard side, well inside a 1,350u reach, was
+        // written off as gone.
+        //
+        // A rock this close cannot be reached by shooting harder, only by turning, so say so and
+        // let the mining loop point the ship at it rather than throwing it away.
+        if (TargetOutOfArc(rock) is { } offBy)
+        {
+            _mineProgressAt = now;                     // it has had no fair chance yet
+            Log?.Invoke($"{rock} is {offBy:F0}° off the nose — outside the mining arc, so every "
+                      + "cast is being refused silently. Turning to face it.");
+            return false;
+        }
 
         DropTarget(rock.Id, $"{T.MiningStallSeconds:F0}s of firing with no damage dealt and no ore "
                           + "banked — it is gone, or we cannot reach it",
