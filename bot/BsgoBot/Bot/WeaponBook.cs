@@ -315,10 +315,16 @@ public sealed class WeaponBook
                 // An assumed Cast that turns out to be a Toggle is corrected on the line above;
                 // either way the guess is over.
                 if (w.KindAssumed) { w.Kind = kind; w.KindAssumed = false; }
-                // A self-cast is proof, not a guess: nothing else in the game targets your own
-                // ship. It outranks the Utility label a stat sweep hands out by default.
+                // A self-cast says an ability is aimed at your own ship. It does NOT say the
+                // ability repairs anything — a shield, a cloak, a power booster and a damage
+                // control module are all self-cast, and this used to relabel every one of them
+                // Repair, including slots the server had already classified. SelfRepairAsync
+                // then fired the lot at the hull and bsgo.fun closed the connection.
+                //
+                // So it now fills a genuine blank only, and never argues with a classification
+                // that came from the stat stream or the catalogue.
                 if (w.RoleFromUser) { /* you already said what this is */ }
-                else if (role == WeaponRole.Repair && w.Role is WeaponRole.Unknown or WeaponRole.Utility)
+                else if (role == WeaponRole.Repair && w.Role == WeaponRole.Unknown && !w.RoleFromStats)
                     w.Role = WeaponRole.Repair;
                 else if (w.Role == WeaponRole.Unknown) w.Role = role;
                 if (!w.Source.Contains("your shot"))

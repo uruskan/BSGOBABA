@@ -145,6 +145,25 @@ public sealed partial class FarmBot
         var now = DateTime.UtcNow;
         foreach (var w in Weapons.For(WeaponRole.Repair))
         {
+            // A GUESSED Repair label is not enough to fire something at your own hull.
+            //
+            // The label is handed out by RoleOf to anything ever seen cast at your own ship,
+            // which is a fair prior and completely unfit to act on: it cannot tell damage
+            // control from a shield, a cloak or an ability id that is not a fitted module at
+            // all. Firing one of those is not a wasted cast — bsgo.fun closes the connection,
+            // every time, about 70ms later. Three sessions died to ability #4 alone, and #3,
+            // the real module, ran 87 times without ever costing a session.
+            //
+            // So: only what you declared in the loadout panel, or what the catalogue stated
+            // outright as a RestoreBuff. Both of those are somebody actually knowing.
+            if (!w.RoleFromUser && !w.RoleFromStats)
+            {
+                WarnOnce($"Ability #{w.AbilityId} looks like a repair module but nothing has "
+                       + "confirmed it — declare it in the loadout panel to have the bot use it. "
+                       + "Casting an unconfirmed module at your own hull drops the connection.");
+                continue;
+            }
+
             double interval = w.Cooldown is { } cd && cd > 0 ? cd * 1000.0 : T.RepairIntervalMs;
             if ((now - w.LastFired).TotalMilliseconds < interval) continue;
             if (!CanAfford(w)) continue;
