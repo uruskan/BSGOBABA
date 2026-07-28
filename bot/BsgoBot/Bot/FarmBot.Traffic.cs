@@ -147,6 +147,30 @@ public sealed partial class FarmBot
 
         // A destination in a sector you are no longer in is not a destination.
         if (_following) EndFollow($"Fly-to ended — you left the sector ({cause})");
+        ForgetSectorState();
+        Log?.Invoke($"Left the sector ({cause}). World cleared.");
+    }
+
+    /// <summary>
+    /// Drops everything the bot believes about a specific object id.
+    ///
+    /// <para>Every collection in here is keyed by object id, and <b>object ids are re-used from
+    /// one sector to the next</b> — the type lives in the id's top bits and the rest is an index
+    /// the server hands out per sector. So a verdict reached about rock #07000019 in one sector
+    /// lands on a completely unrelated rock in the next one.</para>
+    ///
+    /// <para><see cref="_skip"/> and <see cref="_hardSkip"/> are the ones that hurt, and they are
+    /// exactly the two this used to leave behind. A rock condemned as unscannable is muted for
+    /// <see cref="BotTuning.MuteRockSkipMinutes"/> — thirty minutes — so after a jump the bot
+    /// arrives already refusing a handful of perfectly good rocks it has never seen, skips the
+    /// scanned and confirmed ones among them, and goes looking for something else. That is the
+    /// "it ignores rocks it just confirmed and chases ghosts after a jump" behaviour.</para>
+    ///
+    /// <para>What deliberately does NOT reset: <see cref="_probed"/> and the weapon book. Which
+    /// ability is your scanner is a fact about your ship, not about a sector.</para>
+    /// </summary>
+    private void ForgetSectorState()
+    {
         lock (_gate)
         {
             _target = 0; _lockedTarget = 0; _subscribedTarget = 0; _pinned = 0;
@@ -160,11 +184,24 @@ public sealed partial class FarmBot
             // condemned a working scanner two casts into the next launch.
             _scansWithoutReply = 0;
             _ammoWarned = false;
+            _filterAbandoned = false;
             // A station that would not take us in is a fact about that station, and ids do not
             // survive a sector change.
             _dockRefused.Clear();
+            // The condemned-rock lists. See the note above: leaving these behind is what makes a
+            // fresh sector look like one the bot has already given up on.
+            _skip.Clear(); _hardSkip.Clear();
         }
-        Log?.Invoke($"Left the sector ({cause}). World cleared.");
+
+        // In-flight bookkeeping that names an id. None of these survive the objects they refer
+        // to, and a watchdog still counting against a rock in the last sector fires on the next.
+        _mineWatchId = 0;
+        _holdId = 0;
+        _roamTarget = 0;
+        _approachId = 0;
+        _dodgeId = 0; _dodgeSince = DateTime.MinValue;
+        _escapeFrom = 0; _escapeSince = DateTime.MinValue;
+        _detourSince = DateTime.MinValue;
     }
 
     /// <summary>Watches both directions: your traffic teaches the bot, the server's builds the map.</summary>
@@ -307,8 +344,19 @@ public sealed partial class FarmBot
             // The other half of the undock sequence, logged for the same reason as Room.Quit:
             // the client sends this itself once the space level has loaded, and seeing the two
             // land in order is the whole proof of how undocking works.
+            // Also the moment to forget the last sector, and the ONLY one that can be relied on.
+            //
+            // OnSectorLeft runs off Reply.RemoveMe, which the server does not always send us:
+            // jumping by hand, and respawning into a sector other than the one you died in, both
+            // put the ship somewhere new without that message necessarily arriving. JumpIn is the
+            // client stating its space level has loaded, so whatever happened, the objects around
+            // us now are new ones — and any id-keyed verdict we still hold describes a different
+            // sector's objects. Clearing twice costs nothing; not clearing costs half an hour of
+            // skipping good rocks.
             case GameOp.Request.JumpIn:
-                Log?.Invoke("Client sent Game/JumpIn (61) — its space level has finished loading.");
+                ForgetSectorState();
+                Log?.Invoke("Client sent Game/JumpIn (61) — its space level has finished loading. "
+                          + "Forgot the last sector's skipped and scanned rocks.");
                 break;
 
             // You picked a target by hand — respect it if it suits the current mode.
