@@ -887,6 +887,7 @@ public sealed partial class FarmBot
                                        && !IsSkipped(o.Id, _hardSkip)
                                        && !IsCorpse(o)
                                        && !InStationDanger(o)
+                                       && !NearHostileMover(o)
                                        && !KnownContents(o, now));
         if (unknown is null) return null;
 
@@ -1042,6 +1043,11 @@ public sealed partial class FarmBot
         // the moment it got scanned. It is used for the facility order below, and nowhere else.
         // A rock parked under an enemy platform's guns is not a rock we can work.
         if (InStationDanger(o)) return false;
+
+        // And not one with a drone loitering over it. Mining is twenty seconds of sitting still
+        // in the open, which is the worst possible way to share a neighbourhood with something
+        // that hunts. The belt has hundreds more rocks; it does not have a second hull.
+        if (NearHostileMover(o)) return false;
 
         bool known = KnownContents(o, now);
         if (known && o.ResourceCount == 0) return false;

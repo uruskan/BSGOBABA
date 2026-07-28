@@ -222,6 +222,26 @@ public sealed class BotTuning
     public float LocalTravelSeconds { get; set; } = 30f;
 
     /// <summary>
+    /// Leave rocks alone if a hostile that MOVES — a drone, an NPC fighter — is within this far of
+    /// them. 0 turns it off.
+    ///
+    /// <para>Separate from <see cref="HostileStationKeepOut"/> because the two want opposite
+    /// treatment. A platform is a place: back out of its envelope and the problem is solved. A
+    /// drone is not a place, and backing away from one solves nothing because it follows. The only
+    /// move that helps against something mobile is to not have parked next to it — so this steers
+    /// target selection rather than triggering an escape.</para>
+    ///
+    /// <para>Deliberately wider than a drone's own reach: twenty seconds motionless beside a rock
+    /// is a long time to be inside anything's envelope, and a rock with company is rarely worth
+    /// the trade when the belt has hundreds more.</para>
+    /// </summary>
+    public float HostileShipKeepOut { get; set; } = 2000f;
+
+    /// <summary>Treat enemy PLAYERS as things to stay away from too, not just NPCs. Off by
+    /// default: on a busy server it can empty the map of workable rocks.</summary>
+    public bool AvoidPlayers { get; set; }
+
+    /// <summary>
     /// This ship's half-size in units — bow to centre, or centre to wingtip, whichever is larger.
     /// 0 works it out.
     ///

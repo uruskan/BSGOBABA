@@ -279,6 +279,66 @@ public sealed partial class FarmBot
         return false;
     }
 
+    /// <summary>
+    /// Hostile things that MOVE — drones, NPC fighters, anything that hunts rather than sits.
+    ///
+    /// Kept apart from <see cref="HostileStations"/> because the two need opposite handling. A
+    /// platform is a place: back out of its envelope and it is solved forever, which is what
+    /// <see cref="LeaveStationDangerAsync"/> does. A drone is not a place — backing away from one
+    /// achieves nothing, because it follows. The only useful move against a mobile hostile is to
+    /// not be mining beside it in the first place.
+    ///
+    /// <para>So this feeds target SELECTION rather than an escape: rocks in their company are not
+    /// chosen. What to do once something is already shooting is <see cref="IsThreat"/>'s job, and
+    /// that has not changed.</para>
+    /// </summary>
+    private List<SpaceObj> HostileMovers()
+    {
+        if (T.HostileShipKeepOut <= 0f) return [];
+
+        var now = DateTime.UtcNow;
+        lock (_stationGate)
+        {
+            if (_moverCache is not null && (now - _moverCacheAt).TotalMilliseconds < 500)
+                return _moverCache;
+        }
+
+        var fresh = _world.Snapshot()
+            .Where(o => o.HasPosition && !o.IsMe && o.Id != _world.MyObjectId
+                     && !o.Cloaked
+                     && !EntityTypes.IsStatic(o.Id) && !EntityTypes.IsMinable(o.Id)
+                     && !IsEmplacement(o)
+                     && (EntityTypes.IsNpcCombatant(o.Id) || IsHomingHazard(o)
+                         || (T.AvoidPlayers && o.Type == SpaceEntityType.Player))
+                     && _world.RelationTo(o.Id) is Relation.Enemy or Relation.Neutral)
+            .ToList();
+
+        lock (_stationGate)
+        {
+            _moverCache = fresh;
+            _moverCacheAt = now;
+        }
+        return fresh;
+    }
+
+    private List<SpaceObj>? _moverCache;
+    private DateTime _moverCacheAt;
+
+    /// <summary>
+    /// Whether a contact sits close enough to something hostile and mobile to be worth leaving
+    /// alone. Uses the predicted position: a drone's whereabouts a second from now is what a rock
+    /// we are about to spend twenty seconds beside actually has to be judged against.
+    /// </summary>
+    private bool NearHostileMover(SpaceObj o)
+    {
+        if (T.HostileShipKeepOut <= 0f || !o.HasPosition) return false;
+        var now = DateTime.UtcNow;
+        foreach (var m in HostileMovers())
+            if (Vector3.Distance(m.PredictedPosition(now), o.Position) <= T.HostileShipKeepOut)
+                return true;
+        return false;
+    }
+
     /// <summary>The enemy emplacement we are currently too close to, nearest first.</summary>
     private SpaceObj? StationTooClose()
     {
