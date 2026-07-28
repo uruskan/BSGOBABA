@@ -54,7 +54,11 @@ public sealed record SlotDeclaration(
     float? Cooldown,
     float? PowerCost,
     string Ammo,
-    bool Enabled);
+    bool Enabled,
+    /// <summary>The catalogue guid that was installed in this slot when you described it, so a
+    /// refit — or a different ship — can be told apart from the loadout you actually meant.
+    /// 0 when it was never recorded, which means the declaration cannot be checked.</summary>
+    uint SystemGuid = 0);
 
 public sealed class Weapon
 {
@@ -100,6 +104,18 @@ public sealed class Weapon
     /// in <see cref="WeaponBook.MarkScanner"/> then refused the server's own scan reply forever.
     /// </summary>
     public bool RoleFromStats { get; set; }
+
+    /// <summary>
+    /// The catalogue guid that was in this slot when you described it. 0 if never recorded.
+    ///
+    /// What makes a declaration checkable. <see cref="RoleFromUser"/> is the strongest evidence
+    /// the bot has and it outranks the server — which is right while it describes the ship you
+    /// are actually flying, and dangerous the moment it does not. Slot 3 on a Raptor is damage
+    /// control; slot 3 on a Vanir is whatever that hull put there. Same id, same saved profile,
+    /// completely different module, and the bot would have gone on firing it at its own hull on
+    /// the strength of a sentence typed about a different ship.
+    /// </summary>
+    public uint DeclaredSystemGuid { get; set; }
 
     // ---------------------------------------------------------------- numbers
     //
@@ -274,6 +290,43 @@ public sealed class WeaponBook
     /// matters — several carry limited charges, and burning one to learn it isn't a scanner is a
     /// bad trade. Abilities we've only ever watched you fire are tried last.
     /// </summary>
+    /// <summary>
+    /// Drops declarations that describe a module which is no longer in the slot.
+    /// </summary>
+    /// <remarks>
+    /// A declaration is the strongest evidence the bot has. That is correct while it describes
+    /// the ship being flown and actively harmful the moment it does not: swap hull, and slot 3 is
+    /// still called "damage control, fire it at yourself" by a profile written for a different
+    /// ship. The saved catalogue guid is what tells the two apart, and it was already being
+    /// recorded — the loadout panel even drew a "refitted" marker with it — but nothing in the
+    /// bot's decision path had ever consulted it.
+    ///
+    /// <para>Only fires when the server has actually stated what is in the slot and the guid
+    /// disagrees. An unknown guid on either side proves nothing and is left alone.</para>
+    /// </remarks>
+    /// <returns>The abilities whose declaration was withdrawn.</returns>
+    public List<Weapon> DropStaleDeclarations(Func<ushort, uint?> installedSystemGuid)
+    {
+        var stale = new List<Weapon>();
+        lock (_gate)
+        {
+            foreach (var w in _weapons.Values)
+            {
+                if (!w.RoleFromUser || w.DeclaredSystemGuid == 0) continue;
+
+                uint? live = installedSystemGuid(w.AbilityId);
+                if (live is null or 0 || live == w.DeclaredSystemGuid) continue;
+
+                w.RoleFromUser = false;
+                w.Role = WeaponRole.Unknown;
+                w.RoleFromStats = false;
+                w.DeclaredSystemGuid = 0;
+                stale.Add(w);
+            }
+        }
+        return stale;
+    }
+
     public List<Weapon> ProbeCandidates()
     {
         lock (_gate)
@@ -463,6 +516,7 @@ public sealed class WeaponBook
             w.UserOptimalRange = d.OptimalRange;
             w.UserCooldown = d.Cooldown;
             w.UserPowerCost = d.PowerCost;
+            w.DeclaredSystemGuid = d.SystemGuid;
         }
 
         Learned?.Invoke(w, isNew);

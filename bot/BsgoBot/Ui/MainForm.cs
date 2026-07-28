@@ -226,7 +226,7 @@ public sealed class MainForm : Form
                 return new SlotDeclaration(
                     (ushort)d.SlotId, d.Name, category, d.Level, role,
                     d.MaxRange, d.OptimalRange, d.MinRange, d.Cooldown, d.PowerCost,
-                    d.Ammo, d.Enabled);
+                    d.Ammo, d.Enabled, d.SystemGuid);
             })
             .ToList());
     }

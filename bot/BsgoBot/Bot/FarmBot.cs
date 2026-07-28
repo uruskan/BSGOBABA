@@ -507,6 +507,18 @@ public sealed partial class FarmBot
             // How big the solid things around us are. Same clock, because a body whose size we
             // are guessing at is one we are steering around on a guess.
             await AskUnknownSizesAsync(DateTime.UtcNow);
+
+            // Did you change ship? A declaration outranks everything the server says, so one
+            // written about a different hull is the most dangerous thing in the book — slot 3 is
+            // damage control on a Raptor and something else entirely on a Vanir, and the bot
+            // would fire it at its own hull on the strength of the old sentence.
+            var stale = Weapons.DropStaleDeclarations(
+                id => _world.MyLoadout?.Slot(id)?.SystemGuid);
+            if (stale.Count > 0)
+                Log?.Invoke($"Loadout changed — {stale.Count} slot(s) hold a different item than "
+                          + $"you described ({string.Join(", ", stale.Select(w => $"#{w.AbilityId}"))}). "
+                          + "Those declarations are withdrawn and the bot will not use those slots. "
+                          + "Re-describe them in the loadout panel.");
         }
 
         // Not in the sector: dead, docked, or jumping. Getting back out is its own sequence and
