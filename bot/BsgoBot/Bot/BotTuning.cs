@@ -210,6 +210,18 @@ public sealed class BotTuning
     public float MinimumStandoff { get; set; } = 150f;
 
     /// <summary>
+    /// How many seconds of travel still counts as "here" when picking the next rock. 0 falls back
+    /// to the scanner's reach alone, which is the old behaviour.
+    ///
+    /// <para>Within this radius a confirmed rock is preferred outright over a nearer unconfirmed
+    /// one — worth it when the trip is short, ruinous when it is not. Expressed in seconds rather
+    /// than units so it scales with the hull: at 30 seconds a Raptor ranges ~1,600u for a known
+    /// rock and a Vanir ~800u, which is the same decision measured in the currency that actually
+    /// matters, which is time.</para>
+    /// </summary>
+    public float LocalTravelSeconds { get; set; } = 30f;
+
+    /// <summary>
     /// This ship's half-size in units — bow to centre, or centre to wingtip, whichever is larger.
     /// 0 works it out.
     ///

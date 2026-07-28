@@ -961,7 +961,36 @@ public sealed partial class FarmBot
     /// the radius the ship can survey without moving — everything inside it is knowable from
     /// where we stand, and everything outside is a journey.
     /// </summary>
-    private float LocalRadius => ScanReach();
+    /// <summary>
+    /// How far counts as "here" when choosing what to mine next.
+    ///
+    /// This used to be the scanner's reach alone, on the reasoning that everything inside it is
+    /// knowable from where we stand and everything outside is a journey. That is an argument about
+    /// KNOWLEDGE being used to decide TRAVEL, and the two only coincide on a ship whose scanner
+    /// and legs are matched.
+    ///
+    /// <para>They are not on a line ship. A 4,000u scanner made the whole belt "local", and inside
+    /// that radius a confirmed rock beats a nearer unconfirmed one outright, with no weighting by
+    /// distance — so a confirmed rock 3,500u out won against an unscanned one 200u away, and at
+    /// 27 m/s that is a two-minute flight to save a single scan. The same preference is harmless
+    /// on a Raptor only because its 600u scanner keeps the radius small by accident.</para>
+    ///
+    /// <para>So it is capped by how far the ship can actually get in
+    /// <see cref="BotTuning.LocalTravelSeconds"/>, which scales itself with speed: the faster the
+    /// hull, the wider "here" legitimately is. The scanner still bounds it from above — nothing
+    /// beyond its reach is knowable without going there either way.</para>
+    /// </summary>
+    private float LocalRadius
+    {
+        get
+        {
+            float knowable = ScanReach();
+            if (T.LocalTravelSeconds <= 0f) return knowable;
+
+            float reachable = Math.Max(TopSpeed, 1f) * T.LocalTravelSeconds;
+            return Math.Min(knowable, reachable);
+        }
+    }
 
     /// <summary>The same test, but only for contacts within <paramref name="radius"/>.</summary>
     private Func<SpaceObj, bool> Bounded(Func<SpaceObj, bool> inner, float radius) =>
