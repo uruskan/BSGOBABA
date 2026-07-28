@@ -524,6 +524,21 @@ public sealed partial class FarmBot
         {
             var held = _world.Get(current);
             if (held is not null && (keep ?? candidate)(held) && held.HasPosition) return held;
+
+            // Say so. This was silent, and silence is why a rock being abandoned half broken
+            // looked identical in the log to one being finished: the only trace was the next
+            // "Engaging" line, with no hint that the previous rock had been left, let alone that
+            // the damage already put into it was thrown away. A swap away from a live target is
+            // one of the few things worth a line every time it happens.
+            if (held is not null && !IsCorpse(held))
+            {
+                string spent = _mineWatchId == current && _mineHull > held.Hull
+                    ? $" after {_mineHull - held.Hull:F0} damage into it"
+                    : "";
+                Log?.Invoke($"Left {held} unfinished{spent} — it no longer qualifies "
+                          + $"({(held.HasPosition ? "something else ranks higher" : "position lost")}).");
+            }
+
             lock (_gate) { if (_target == current) { _target = 0; _lockedTarget = 0; } }
         }
 
