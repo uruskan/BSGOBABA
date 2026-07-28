@@ -107,6 +107,15 @@ public sealed partial class FarmBot
         var guns = Weapons.For(WeaponRole.Combat);
         var (mineGuns, improvised) = MiningWeapons();
         lines.Add($"combat reach   {(guns.Count == 0 ? "no weapon known" : $"{EffectiveRange(guns):F0}u, sit at {PreferredRange(guns, T.CloseInFactor):F0}u + target size")}");
+
+        // Whether this hull can fight and mine at once, which is the whole line-ship question.
+        var mineIds = Weapons.For(WeaponRole.Mining).Select(w => w.AbilityId).ToHashSet();
+        var spare = guns.Where(w => !mineIds.Contains(w.AbilityId)).ToList();
+        lines.Add($"return fire    " + (!T.FightWhileMining ? "off — a threat takes the whole ship"
+            : spare.Count == 0
+                ? "no gun that isn't a mining gun — a threat takes the whole ship"
+                : $"{spare.Count} gun(s) free of the mining set, reach {EffectiveRange(spare):F0}u"
+                  + $", {ReturnFireShots} shot(s) taken without leaving the rock"));
         lines.Add($"hold off       asteroid {T.AsteroidStandoff:F0}u, planetoid {T.PlanetoidStandoff:F0}u");
 
         if (T.AvoidCollisions)

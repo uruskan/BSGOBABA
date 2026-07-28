@@ -578,13 +578,24 @@ public sealed partial class FarmBot
 
         if (T.Mode == FarmMode.Mining)
         {
-            // Mining is what we're here for, but not while something is shooting. The guns are
-            // already fitted; the bot simply wasn't looking up from the rock.
-            if (T.DefendSelf && NearestThreat() is not null)
+            // Two channels, not one behaviour.
+            //
+            // GUNS first, and it does not return: a ship with cannons as well as mining gear
+            // answers a drone with the cannons and keeps the lasers on the rock. Firing at two
+            // targets in one tick is legal — the server reads each cast's own target list and
+            // ignores what is locked — so the old "drop everything and go fight" is only needed
+            // when there is nothing separate to shoot with, or the threat is out of reach.
+            bool answered = await ReturnFireAsync();
+
+            // HELM. Falling back to the full interrupt is still right when return fire could not
+            // take the shot: a strike ship whose cannons ARE its mining guns has nothing to fire
+            // without re-aiming, and a threat beyond reach has to be closed on or fled.
+            if (!answered && T.DefendSelf && NearestThreat() is not null)
             {
                 await CombatTick(IsThreat, "Defending");
                 return;
             }
+
             await MineTick();
         }
         else await CombatTick();

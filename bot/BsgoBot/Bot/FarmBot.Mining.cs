@@ -60,7 +60,12 @@ public sealed partial class FarmBot
         // For(Combat) also yields unidentified abilities, which For(Mining) already returned —
         // firing one twice in a tick is a double cast the server counts against you.
         foreach (var g in Weapons.For(WeaponRole.Combat))
+        {
+            // Already spent on a drone this tick by ReturnFireAsync. Same double-cast problem,
+            // and the rock is the less urgent of the two targets.
+            if (_returnFireGuns.Contains(g.AbilityId)) continue;
             if (seen.Add(g.AbilityId)) all.Add(g);
+        }
         return all;
     }
 

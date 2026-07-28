@@ -324,6 +324,20 @@ public sealed class BotTuning
     public bool FireGunsWhileMining { get; set; } = true;
 
     /// <summary>
+    /// Answer a threat with your combat guns without breaking off the rock.
+    ///
+    /// Needs a ship whose guns are not all mining gear — a line or escort hull with a couple of
+    /// cannons alongside the lasers. On one of those, breaking off a rock to deal with a drone
+    /// costs the whole approach and re-approach for a fight the ship could have had standing
+    /// still. With this on it simply shoots back and keeps mining.
+    ///
+    /// Turning it off restores the old behaviour: a threat takes the whole ship until it is
+    /// dead or gone. That is still what happens anyway when the guns that mine are the only guns
+    /// aboard, or the threat is beyond their reach — see <c>ReturnFireAsync</c>.
+    /// </summary>
+    public bool FightWhileMining { get; set; } = true;
+
+    /// <summary>
     /// Only scan when the answer would change what we do — i.e. when a resource filter is set.
     /// A Mineral Analysis Module costs 50 power at level 1 against a 100-point pool, which is
     /// several seconds of mining lasers. Paying that for information nobody reads is the

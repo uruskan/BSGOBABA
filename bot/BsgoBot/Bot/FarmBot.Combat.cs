@@ -16,6 +16,65 @@ public sealed partial class FarmBot
     /// mining loop passes <see cref="IsThreat"/> so self-defence reuses all of this — approach,
     /// standoff, cooldowns — instead of growing a second, worse copy of it.
     /// </summary>
+    /// <summary>
+    /// Abilities spent on return fire this tick, so the mining set does not fire them twice.
+    /// Cleared at the top of every <see cref="ReturnFireAsync"/>.
+    /// </summary>
+    private readonly HashSet<ushort> _returnFireGuns = [];
+
+    /// <summary>
+    /// Shoot back at whatever is attacking us <b>without stopping mining</b>.
+    ///
+    /// <para>This is the whole reason a line ship is worth flying. Until now a tick did exactly
+    /// one thing: <c>DefendSelf</c> saw a threat and handed the entire ship to
+    /// <see cref="CombatTick"/>, which stopped mining, re-aimed, flew at the target and came back
+    /// to the rock afterwards. On a strike ship with three mining guns and nothing else that was
+    /// the only honest option — the guns that mine are the guns that shoot.</para>
+    ///
+    /// <para>A Vanir is not that ship. It has eight weapon slots, a couple of them cannons, and a
+    /// power pool that can run both. Firing a mining laser at a rock and a cannon at a drone in
+    /// the same tick is legal: the server takes the target list from the cast message itself
+    /// (GameProtocol.CastSlotAbility queues an AbilityCastRequest straight from abilityID plus
+    /// targetIDs) and never consults what you have locked. The lock is a client nicety.</para>
+    ///
+    /// <para>So this fires the combat guns at the threat and returns. It never steers — the helm
+    /// belongs to whatever is mining, which keeps the one rule that has always held: two things
+    /// cannot fly the ship at once. If the threat is beyond the combat guns' reach then shooting
+    /// is not on offer without moving, and the caller falls back to the old interrupt.</para>
+    /// </summary>
+    /// <returns>True when the threat was answered and mining may carry on.</returns>
+    private async Task<bool> ReturnFireAsync()
+    {
+        _returnFireGuns.Clear();
+        if (!T.FightWhileMining || !T.DefendSelf) return false;
+
+        var threat = NearestThreat();
+        if (threat is null) return false;
+
+        // Only guns that are not already the mining set. On a ship whose cannons ARE its mining
+        // tools there is nothing separate to answer with, and the caller's interrupt is right.
+        var mining = Weapons.For(WeaponRole.Mining).Select(w => w.AbilityId).ToHashSet();
+        var guns = Weapons.For(WeaponRole.Combat).Where(w => !mining.Contains(w.AbilityId)).ToList();
+        if (guns.Count == 0) return false;
+
+        float dist = _world.DistanceToMe(threat) ?? float.MaxValue;
+        if (dist > EffectiveRange(guns)) return false;
+
+        await EnsureSubscribed(threat.Id);
+
+        // stillClosing false: we are not flying at it, so the hold-until-optimal rule does not
+        // apply — this is the shot we can take from where mining has already parked us.
+        int fired = await FireAll(guns, threat, dist, stillClosing: false);
+        if (fired == 0) return false;
+
+        foreach (var w in guns) _returnFireGuns.Add(w.AbilityId);
+        ReturnFireShots += fired;
+        return true;
+    }
+
+    /// <summary>Shots taken at a threat without breaking off mining, for the diagnostics dump.</summary>
+    public int ReturnFireShots { get; private set; }
+
     private async Task CombatTick(Func<SpaceObj, bool>? candidate = null, string verb = "Attacking")
     {
         // A caller-supplied candidate means this is the self-defence path, not the hunt — a pin
