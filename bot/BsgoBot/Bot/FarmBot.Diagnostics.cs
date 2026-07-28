@@ -142,6 +142,24 @@ public sealed partial class FarmBot
                        : ahead is null ? "path clear"
                        : $"{ahead} at {room:F0}u")
                     + $", {NearMisses} avoided");
+
+            // What the ship is choosing to hit, and whether it can yet tell. Both halves matter:
+            // the threshold does nothing until enough rocks have been measured to convert a
+            // radius into hull points.
+            if (T.IgnoreCollisionHullFraction > 0f)
+            {
+                float maxHull = _world.MyMaxHull ?? 0f;
+                int samples;
+                lock (_gate) samples = _rockHpPerRadius.Count;
+
+                lines.Add($"clip instead   under {T.IgnoreCollisionHullFraction:P0} of hull"
+                        + (maxHull > 0 ? $" (~{maxHull * T.IgnoreCollisionHullFraction:F0} points)" : "")
+                        + $" — {ClipsAllowed} flown through, "
+                        + (samples < RockSizeSamplesNeeded
+                           ? $"rock sizes not learned yet ({samples}/{RockSizeSamplesNeeded} measured, dodging all)"
+                           : $"{samples} rock(s) measured")
+                        + (TurnSpeed is { } deg ? $", turn {deg:F0}°/s" : ", turn rate unknown — braking always"));
+            }
         }
         else
         {

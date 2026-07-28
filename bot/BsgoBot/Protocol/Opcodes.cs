@@ -330,6 +330,9 @@ public enum ObjectStat : ushort
     CriticalDefense = 16,
     Speed = 25,
     BoostSpeed = 26,
+    /// <summary>Degrees per second the hull turns at. What decides whether a deflection can
+    /// actually be flown before reaching the thing it is meant to miss.</summary>
+    TurnSpeed = 32,
     MaxHullPoints = 33,
     HullRecovery = 34,
     MaxPowerPoints = 35,

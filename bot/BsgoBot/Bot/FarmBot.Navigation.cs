@@ -191,9 +191,14 @@ public sealed partial class FarmBot
             // 0, throttle pinned to T.MinApproachSpeed — crawled its way out over tens of seconds
             // while the mining brake held it down as well. That is the wedge: the one state where
             // the ship is definitely in the wrong place is the state it left at walking pace.
+            // Braking buys no damage relief — the collision formula has no speed term — so it is
+            // worth doing only when it buys the seconds the turn needs. On a rock the deflection
+            // already clears, slowing down is pure lost travel, and travel is most of the clock.
             throttle = blocker.Id == _escapeFrom
                 ? EscapeThrottle(blocker, now)
-                : Math.Min(throttle, ThrottlePastObstacle(blocker, gap, brakeZone));
+                : BrakingBuysTheTurn(blocker, gap)
+                    ? Math.Min(throttle, ThrottlePastObstacle(blocker, gap, brakeZone))
+                    : throttle;
 
             gear = Gear.Regular;
             NoteDodge(blocker, gap, now);
@@ -249,6 +254,20 @@ public sealed partial class FarmBot
         {
             if (o.IsMe || o.Id == ignoreId || o.Id == _world.MyObjectId) continue;
             if (!o.HasPosition || !EntityTypes.IsSolid(o.Id)) continue;
+
+            // Measure whatever we can see, so the radius-to-hull conversion keeps improving.
+            NoteRockSize(o);
+
+            // Cheap enough to hit that flying round it costs more than the hull it saves. Dropped
+            // here rather than later on purpose: an obstacle that never becomes the blocker is one
+            // the deflection never bends for AND the throttle never brakes for, which is the whole
+            // saving. The one exception is a rock we are already inside — that is an escape, not a
+            // dodge, and it has to keep working however small the rock is.
+            if (o.Id != _escapeFrom && !WorthDodging(o, out float clipCost))
+            {
+                NoteSkippedDodge(o, clipCost, now);
+                continue;
+            }
 
             var toObs = o.PredictedPosition(now) - me;
             float clear = ClearanceOf(o);
@@ -591,6 +610,166 @@ public sealed partial class FarmBot
             uint guid = _world.Get(_world.MyObjectId)?.CardGuid ?? 0;
             return guid == 0 ? 0f : Cards.World(guid)?.Radius ?? 0f;
         }
+    }
+
+    // ------------------------------------------------------------------ what a clip actually costs
+
+    /// <summary>
+    /// Observed hull points per unit of asteroid radius, newest last. Capped, because this only
+    /// needs to be roughly right and an unbounded list on a 250ms loop is a leak.
+    /// </summary>
+    private readonly List<float> _rockHpPerRadius = [];
+
+    /// <summary>Rocks already sampled, so one rock cannot dominate the estimate by being
+    /// re-measured on every tick it stays subscribed.</summary>
+    private readonly HashSet<uint> _rockHpSampled = [];
+
+    /// <summary>
+    /// Learns how much hull an asteroid carries per unit of radius.
+    ///
+    /// Needed because hull points arrive only for objects we have <b>subscribed</b> to, which in
+    /// practice means the rock we are mining and nothing else. Every other rock in the belt — the
+    /// ones actually in the way — publishes a radius and nothing more. So the radius has to stand
+    /// in for the hull, and the conversion between them is measured off the rocks we do know
+    /// rather than invented.
+    /// </summary>
+    private void NoteRockSize(SpaceObj o)
+    {
+        if (!o.StatsKnown || o.Hull <= 0f || o.Radius <= 0f) return;
+        if (o.Type != SpaceEntityType.Asteroid) return;
+        lock (_gate)
+        {
+            if (!_rockHpSampled.Add(o.Id)) return;
+            _rockHpPerRadius.Add(o.Hull / o.Radius);
+            if (_rockHpPerRadius.Count > 200) _rockHpPerRadius.RemoveAt(0);
+        }
+    }
+
+    /// <summary>How many rocks must have been measured before the estimate is trusted at all.</summary>
+    private const int RockSizeSamplesNeeded = 5;
+
+    /// <summary>
+    /// Hull points we believe an asteroid has, or null when there is no honest way to say.
+    ///
+    /// A rock we have stats for answers for itself. Everything else is its radius times a high
+    /// percentile of what rocks have measured so far — high on purpose, because the whole point of
+    /// the number is deciding what is safe to hit, and the expensive direction to be wrong in is
+    /// guessing a rock is small.
+    /// </summary>
+    private float? EstimatedRockHull(SpaceObj o)
+    {
+        if (o.StatsKnown && o.Hull > 0f) return o.Hull;
+        if (o.Radius <= 0f) return null;
+
+        lock (_gate)
+        {
+            if (_rockHpPerRadius.Count < RockSizeSamplesNeeded) return null;
+            var sorted = _rockHpPerRadius.Order().ToList();
+            float p90 = sorted[Math.Min(sorted.Count - 1, (int)(sorted.Count * 0.9f))];
+            return o.Radius * p90;
+        }
+    }
+
+    /// <summary>
+    /// Hull points a collision with this object would cost us, or null if unknown.
+    ///
+    /// The server charges <c>0.5 * the asteroid's max hull points</c>, reduced by armour only
+    /// where armour exceeds the collision's armour piercing of 50 — which a 40-armour line hull
+    /// does not, so it pays the full price (bsgocore <c>DamageCalculator.calculateDamageFromCollision</c>).
+    ///
+    /// <para><b>There is no speed term.</b> Drifting into a rock at walking pace costs exactly
+    /// what ramming it at full boost costs. Braking for an obstacle therefore buys no damage
+    /// reduction whatsoever — its only value is the extra seconds it gives the ship to turn.</para>
+    ///
+    /// <para>Reads low for a rock we have already mined into: the server uses the rock's MAX hull
+    /// and this can only see what is left of it. That errs towards flying through a rock we have
+    /// been shooting, which is the one we are parked next to anyway.</para>
+    /// </summary>
+    private float? CollisionCost(SpaceObj o) =>
+        EstimatedRockHull(o) is { } hp ? 0.5f * hp : null;
+
+    /// <summary>
+    /// Whether this obstacle is worth the detour, or cheaper to simply hit.
+    ///
+    /// Only asteroids are ever waved through. A planetoid, a station or another ship is either far
+    /// too expensive or not covered by the collision formula at all.
+    ///
+    /// The comparison is against our own hull, so it scales itself across ships without a second
+    /// setting: five percent of a Raptor is a pebble, five percent of a Vanir is a respectable
+    /// rock — and the Vanir regenerates it in a few seconds, while turning a 27 m/s hull at 22
+    /// degrees a second around the same rock costs far longer than that.
+    /// </summary>
+    private bool WorthDodging(SpaceObj o, out float cost)
+    {
+        cost = 0f;
+        if (T.IgnoreCollisionHullFraction <= 0f) return true;
+        if (o.Type != SpaceEntityType.Asteroid) return true;
+
+        // Unknown cost is dodged. Never skip on a guess.
+        if (CollisionCost(o) is not { } predicted) return true;
+        if (_world.MyMaxHull is not { } maxHull || maxHull <= 0f) return true;
+
+        cost = predicted;
+        return predicted > maxHull * T.IgnoreCollisionHullFraction;
+    }
+
+    /// <summary>Obstacles we have decided to fly through, so the log gets one line each rather
+    /// than one per tick.</summary>
+    private readonly Dictionary<uint, DateTime> _clipNoted = new();
+
+    private void NoteSkippedDodge(SpaceObj rock, float cost, DateTime now)
+    {
+        lock (_gate)
+        {
+            if (_clipNoted.TryGetValue(rock.Id, out var at) && (now - at).TotalSeconds < 30) return;
+            _clipNoted[rock.Id] = now;
+            if (_clipNoted.Count > 200)
+                foreach (var stale in _clipNoted.Where(k => (now - k.Value).TotalMinutes > 5)
+                                                .Select(k => k.Key).ToList())
+                    _clipNoted.Remove(stale);
+        }
+
+        ClipsAllowed++;
+        float hull = _world.MyMaxHull ?? 0f;
+        Log?.Invoke($"Not dodging {rock} (r{rock.Radius:F0}u) — a clip costs about {cost:F0} hull"
+                  + (hull > 0 ? $", {cost / hull:P1} of ours" : "")
+                  + (rock.StatsKnown ? " (measured)" : " (estimated from radius)")
+                  + ". Turning around it costs more.");
+    }
+
+    /// <summary>Obstacles waved through this session, for the diagnostics dump.</summary>
+    public int ClipsAllowed { get; private set; }
+
+    /// <summary>
+    /// Degrees per second the hull turns at, as published. Null when the server never said.
+    /// </summary>
+    private float? TurnSpeed => _world.ShipStat(ObjectStat.TurnSpeed) is > 0 and var t ? t : null;
+
+    /// <summary>
+    /// Whether slowing down would actually help us miss this, as opposed to merely arriving late.
+    ///
+    /// Braking cannot reduce collision damage — see <see cref="CollisionCost"/> — so the only
+    /// reason to do it is to buy the seconds a turn needs. That makes it a comparison: the time
+    /// left before we reach the obstacle against the time it takes to swing the nose far enough
+    /// to clear it. If the turn already fits, braking is pure lost travel.
+    ///
+    /// Unknown turn rate keeps the old unconditional braking, because a guess here is a ram.
+    /// </summary>
+    private bool BrakingBuysTheTurn(SpaceObj blocker, float gap)
+    {
+        if (TurnSpeed is not { } degPerSec) return true;
+
+        float speed = Math.Max(TopSpeed, 1f);
+        float secondsToImpact = gap / speed;
+
+        // How far off the nose the obstacle's edge sits, from where we are now. Small angles for
+        // something dead ahead and far off, which is exactly the case a turn clears easily.
+        float along = gap + ClearanceOf(blocker);
+        float needDegrees = MathF.Atan2(ClearanceOf(blocker), Math.Max(along, 1f)) * (180f / MathF.PI);
+        float secondsToTurn = needDegrees / degPerSec;
+
+        // Braking only earns its keep when the turn does not already fit, with margin.
+        return secondsToTurn > secondsToImpact * 0.75f;
     }
 
     /// <summary>One line per obstacle, not one per tick — a dodge lasts several seconds and the

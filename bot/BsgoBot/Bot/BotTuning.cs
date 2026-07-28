@@ -297,6 +297,22 @@ public sealed class BotTuning
     public float PlanetoidClearanceFactor { get; set; } = 1.25f;
 
     /// <summary>
+    /// Fly through any asteroid whose collision would cost less than this fraction of maximum
+    /// hull, instead of steering around it. 0 turns it off and dodges everything, as before.
+    ///
+    /// <para>The server charges half the rock's hull points for a collision and applies <b>no
+    /// speed term at all</b>, so the choice is simply: pay that hull, or pay the seconds it takes
+    /// to fly around. On a line ship the hull is much the cheaper of the two — a Vanir carries
+    /// ~4,500 points and recovers 35 a second, so a small rock costs it about three seconds of
+    /// regeneration, while turning a 27 m/s hull at 22 degrees a second around the same rock
+    /// costs far longer. On a strike ship the same fraction is a handful of points, so it keeps
+    /// dodging almost everything. One number, right on both hulls.</para>
+    ///
+    /// <para>Only asteroids qualify. Planetoids, stations and ships are always avoided.</para>
+    /// </summary>
+    public float IgnoreCollisionHullFraction { get; set; } = 0.05f;
+
+    /// <summary>
     /// Size to assume for a planetoid the server has not published a radius for.
     ///
     /// Deliberately large. The radius arrives in a WhoIs body and for scenery it often never
