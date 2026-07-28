@@ -282,6 +282,74 @@ public sealed partial class FarmBot
     public string Status { get; private set; } = "Idle";
     public uint CurrentTarget => _target;
 
+    // ------------------------------------------------------------------ what the map needs
+
+    /// <summary>
+    /// What the ship is doing right now, as one word. Same enum the meter splits time by, so the
+    /// map and the throughput figures can never disagree about which state we were in.
+    /// </summary>
+    public MiningActivity Activity => Meter.Current;
+
+    /// <summary>
+    /// The distance the bot is trying to hold from <see cref="CurrentTarget"/>, or null when it
+    /// has no target or no weapon to size one with.
+    ///
+    /// Exposed for the map: drawing the ring the ship is actually aiming for is the difference
+    /// between "it stopped in a strange place" and "it stopped exactly where it meant to, and the
+    /// number that decided it is wrong".
+    /// </summary>
+    public float? TargetStandoff
+    {
+        get
+        {
+            uint id;
+            lock (_gate) id = _target;
+            if (id == 0 || _world.Get(id) is not { } target) return null;
+
+            var (guns, _) = MiningWeapons();
+            if (guns.Count == 0) guns = Weapons.For(WeaponRole.Combat);
+            return guns.Count == 0 ? null : StandoffFor(target, guns);
+        }
+    }
+
+    /// <summary>
+    /// Why the bot will not go near a contact, or null if nothing is holding it back.
+    ///
+    /// The map's job is to make a decision legible, and "it is ignoring that perfectly good rock"
+    /// is the commonest thing to want explained. A skip is a timed note, so this reports how long
+    /// is left rather than merely that one exists.
+    /// </summary>
+    /// <summary>
+    /// Every contact the bot is currently refusing to go to, in one snapshot.
+    ///
+    /// Taken whole rather than asked per contact: the map redraws four times a second against
+    /// several hundred objects, and taking the bot's lock once per dot to answer the same question
+    /// is a lot of contention for a picture.
+    /// </summary>
+    public HashSet<uint> IgnoredContacts()
+    {
+        var now = DateTime.UtcNow;
+        lock (_gate)
+        {
+            var ignored = new HashSet<uint>();
+            foreach (var (id, until) in _skip) if (until > now) ignored.Add(id);
+            foreach (var (id, until) in _hardSkip) if (until > now) ignored.Add(id);
+            return ignored;
+        }
+    }
+
+    public string? SkipReason(uint id)
+    {
+        lock (_gate)
+        {
+            if (_hardSkip.TryGetValue(id, out var hard) && hard > DateTime.UtcNow)
+                return $"written off for {(hard - DateTime.UtcNow).TotalMinutes:F0} min";
+            if (_skip.TryGetValue(id, out var soft) && soft > DateTime.UtcNow)
+                return $"skipped for {(soft - DateTime.UtcNow).TotalSeconds:F0}s";
+        }
+        return null;
+    }
+
     /// <summary>The contact you pinned by hand, or 0.</summary>
     public uint PinnedTarget { get { lock (_gate) return _pinned; } }
 

@@ -53,6 +53,9 @@ public sealed class MiningMeter
     private MiningActivity _activity = MiningActivity.Idle;
     private DateTime _activitySince = DateTime.MinValue;
 
+    /// <summary>What the ship is doing at this instant, as opposed to the split over the session.</summary>
+    public MiningActivity Current { get { lock (_gate) return _activity; } }
+
     /// <summary>
     /// Ignore a power sample taken within this long of firing. A toggle weapon's draw and the
     /// server's power push are not synchronised, so a sample straight after a shot can show the

@@ -201,6 +201,7 @@ public sealed class MapPanel : Control
         contacts.Sort((a, b) => b.Depth.CompareTo(a.Depth));
 
         uint targetId = _bot.CurrentTarget;
+        var ignored = _bot.IgnoredContacts();
         var brushes = new Dictionary<int, SolidBrush>();
         SolidBrush Brush(Color c)
         {
@@ -231,6 +232,18 @@ public sealed class MapPanel : Control
                 var (alpha, filled, dashed) = StyleFor(layer);
                 if (o.Cloaked) alpha = (int)(alpha * 0.55f);
                 int size = SizeFor(o.Type);
+
+                // A contact the bot has written off reads as one it simply has not got to yet,
+                // which is the difference between "it is working through them" and "it has given
+                // up on that whole pocket". Drained of colour and struck through, so a field the
+                // bot has exhausted is visible as a field rather than found one rock at a time.
+                bool passed = ignored.Contains(o.Id);
+                if (passed)
+                {
+                    baseColour = Color.FromArgb(
+                        (baseColour.R + 120) / 2, (baseColour.G + 120) / 2, (baseColour.B + 120) / 2);
+                    alpha = (int)(alpha * 0.45f);
+                }
 
                 // Recorded in draw order, i.e. far to near, so the hit test walking backwards
                 // finds the nearest contact first — the one you can actually see.
@@ -270,6 +283,13 @@ public sealed class MapPanel : Control
                     g.DrawEllipse(ring, pTop.X - size / 2f, pTop.Y - size / 2f, size, size);
                 }
 
+                if (passed)
+                {
+                    using var strike = new Pen(Color.FromArgb(alpha + 40, baseColour), 1f);
+                    float r = size / 2f + 2f;
+                    g.DrawLine(strike, pTop.X - r, pTop.Y - r, pTop.X + r, pTop.Y + r);
+                }
+
                 // Selection is drawn under the lock ring and in a different shape, because they
                 // mean different things: what you are looking at, versus what the bot is shooting.
                 if (o.Id == Selected)
@@ -280,6 +300,20 @@ public sealed class MapPanel : Control
 
                 if (o.Id == targetId)
                 {
+                    // The ring the ship is actually flying to, drawn on the ground plane at the
+                    // target. Without it a standoff that lands in a strange place looks like bad
+                    // flying; with it you can see the bot stopped exactly where it meant to, and
+                    // that the number which chose the spot is the thing to argue with.
+                    if (_bot.TargetStandoff is { } standoff && standoff > 0f)
+                    {
+                        var band = PlaneDisc(pGround, scale, standoff);
+                        using var hold = new Pen(Color.FromArgb(70, Theme.Accent), 1f)
+                        {
+                            DashStyle = DashStyle.Dash,
+                        };
+                        g.DrawEllipse(hold, band);
+                    }
+
                     using var lock1 = new Pen(Color.White, 1.6f);
                     g.DrawEllipse(lock1, pTop.X - 11, pTop.Y - 11, 22, 22);
                     using var lead = new Pen(Color.FromArgb(110, Color.White)) { DashStyle = DashStyle.Dash };
@@ -288,12 +322,15 @@ public sealed class MapPanel : Control
                     string label = $"{o.Type}  {dist:F0}u  {Visibility.Describe(layer)}"
                                  // Points, not a ratio — we never learn other objects' maximums.
                                  + (o.StatsKnown ? $"  hull {o.Hull:F0}" : "");
+                    if (_bot.TargetStandoff is { } want)
+                        label += $"   holding {want:F0}u";
                     g.DrawString(label, fontBold, Brush(Color.White), pTop.X + 14, pTop.Y - 7);
                 }
                 else if (o.Id == Selected || o.Id == _hover)
                 {
                     string name = _world.NameOf(o) ?? o.Type.ToString();
-                    g.DrawString($"{name}  {dist:F0}u  {Visibility.Describe(layer)}", fontBold,
+                    string why = _bot.SkipReason(o.Id) is { } reason ? $"   — {reason}" : "";
+                    g.DrawString($"{name}  {dist:F0}u  {Visibility.Describe(layer)}{why}", fontBold,
                         Brush(o.Id == Selected ? Theme.Accent : Color.White), pTop.X + 14, pTop.Y - 7);
                 }
                 else if (labelled.Contains(o.Id))
@@ -373,8 +410,11 @@ public sealed class MapPanel : Control
             clip.AddEllipse(PlaneDisc(centre, scale, Range * 1.5f));
             g.SetClip(clip, CombineMode.Replace);
 
-            using var faint = new Pen(Color.FromArgb(40, 100, 138));
-            using var minor = new Pen(Color.FromArgb(18, 80, 112));
+            // Also alpha rather than opaque near-black blues: blended lines let the plane fade
+            // properly into the haze at the rim instead of stopping dead in a ring of visible
+            // ends, and they stay out of the way of the contacts sitting on top of them.
+            using var faint = new Pen(Color.FromArgb(46, 110, 150, 185));
+            using var minor = new Pen(Color.FromArgb(20, 100, 140, 175));
             using var axis = new Pen(Color.FromArgb(85, 125, 175, 210));
 
             for (int i = -lines; i <= lines; i++)
@@ -402,19 +442,23 @@ public sealed class MapPanel : Control
     /// </summary>
     private void DrawRings(Graphics g, PointF centre, float scale, Font font, DetectionRanges det)
     {
+        // Alpha, deliberately. These were three-argument colours, i.e. fully opaque, so four
+        // dashed ellipses sat on top of the contacts at full strength and the rocks — the actual
+        // subject of the panel — read as background noise between them. They are reference marks;
+        // they should be legible when looked for and invisible when not.
         (float Radius, Color Colour, string Label)[] rings =
         [
-            (det.Map, Color.FromArgb(70, 110, 140), "MAP"),
-            (det.Dradis, Color.FromArgb(70, 175, 205), "DRADIS"),
-            (det.Visual, Color.FromArgb(120, 220, 245), "VISUAL"),
-            (WeaponReach(), Color.FromArgb(120, 235, 150), "REACH"),
+            (det.Map, Color.FromArgb(45, 70, 110, 140), "MAP"),
+            (det.Dradis, Color.FromArgb(60, 70, 175, 205), "DRADIS"),
+            (det.Visual, Color.FromArgb(80, 120, 220, 245), "VISUAL"),
+            (WeaponReach(), Color.FromArgb(95, 120, 235, 150), "REACH"),
         ];
 
         foreach (var (radius, colour, _) in rings)
         {
             if (radius <= 0f || radius * scale > Math.Max(Width, Height) * 2.5f) continue;
 
-            using var pen = new Pen(colour) { DashStyle = DashStyle.Dash };
+            using var pen = new Pen(colour, 1f) { DashPattern = [2f, 4f] };
             const int segments = 72;
             var pts = new PointF[segments + 1];
             for (int i = 0; i <= segments; i++)
@@ -429,9 +473,11 @@ public sealed class MapPanel : Control
         foreach (var (radius, colour, label) in rings)
         {
             if (radius <= 0f) continue;
-            using var swatch = new Pen(colour, 1.4f) { DashStyle = DashStyle.Dash };
+            // The legend is the one place these want full strength: it is read on purpose.
+            var solid = Color.FromArgb(255, colour);
+            using var swatch = new Pen(solid, 1.4f) { DashStyle = DashStyle.Dash };
             g.DrawLine(swatch, Width - 130, y + 6, Width - 118, y + 6);
-            using var text = new SolidBrush(Color.FromArgb(200, colour));
+            using var text = new SolidBrush(Color.FromArgb(200, solid));
             g.DrawString($"{label,-6} {radius,6:F0}u", font, text, Width - 112, y);
             y += 14f;
         }
@@ -458,6 +504,49 @@ public sealed class MapPanel : Control
         g.DrawString("N", f, north, n.X - 4, n.Y - 6);
     }
 
+    /// <summary>
+    /// A single line across the top saying what the ship is doing and why.
+    ///
+    /// The status string already exists and was only ever shown in the window header, which is the
+    /// one place you are not looking while watching the ship fly. Pairing it with the activity
+    /// word makes the two commonest questions answerable without leaving the map: is it working,
+    /// and if not, what is it waiting for.
+    /// </summary>
+    private void DrawIntent(Graphics g, int w)
+    {
+        var (label, tint) = _bot.Activity switch
+        {
+            MiningActivity.Firing => ("FIRING", Theme.Good),
+            MiningActivity.Travelling => ("TRAVELLING", Theme.Warn),
+            MiningActivity.Holding => ("HOLDING", Theme.Bad),
+            _ => ("IDLE", Theme.Muted),
+        };
+
+        using var chipFont = new Font("Consolas", 7.5f, FontStyle.Bold);
+        using var textFont = new Font("Consolas", 7.5f);
+
+        var size = g.MeasureString(label, chipFont);
+        float x = 8, y = 22;
+
+        var chip = new RectangleF(x, y, size.Width + 12, 15);
+        using (var fill = new SolidBrush(Color.FromArgb(38, tint)))
+            Theme.FillRounded(g, chip, 4f, ((SolidBrush)fill).Color);
+        using (var edge = new SolidBrush(tint))
+            g.DrawString(label, chipFont, edge, x + 6, y + 2);
+
+        // Truncated rather than wrapped: this is a glance, and the full text is in the log.
+        string status = _bot.Status;
+        float room = w - chip.Right - 20;
+        using var quiet = new SolidBrush(Color.FromArgb(150, 165, 185));
+        var st = g.MeasureString(status, textFont);
+        if (st.Width > room && room > 40)
+        {
+            int keep = Math.Max(4, (int)(status.Length * room / st.Width) - 1);
+            status = status[..keep] + "…";
+        }
+        g.DrawString(status, textFont, quiet, chip.Right + 8, y + 2);
+    }
+
     /// <summary>Counters plus the clickable band legend.</summary>
     private void DrawHud(Graphics g, Font font, int w, int h, int total,
         DetectionRanges det, Dictionary<ContactLayer, int>? counts)
@@ -467,6 +556,11 @@ public sealed class MapPanel : Control
             $"view {Range:F0}u   yaw {_yaw * 180f / MathF.PI:F0}°   tilt {90f - _tilt * 180f / MathF.PI:F0}°   "
             + "drag to orbit · wheel to zoom · click a contact to select · double-click it to pin",
             font, dim, 8, 6);
+
+        // What the bot is doing, in its own words, on the picture rather than three panels away.
+        // The activity word is the same one the meter splits time by, so a map that says
+        // TRAVELLING and a time split dominated by travel are the same fact seen twice.
+        DrawIntent(g, w);
 
         _legendHits.Clear();
         if (counts is null) return;
