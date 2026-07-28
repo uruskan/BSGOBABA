@@ -74,12 +74,27 @@ public sealed class MiningMeter
     {
         lock (_gate)
         {
+            if (_lastPowerAt == DateTime.MinValue)
+            {
+                _lastPower = power;
+                _lastPowerAt = now;
+                return;
+            }
+
+            // An unchanged reading is not a measurement. The server publishes PowerPoints only
+            // when the value moves, while this is sampled every tick — so a pool climbing 6.24
+            // points once a second is seen as three identical readings and then a jump.
+            //
+            // The baseline used to advance on every one of those, so the whole second's climb was
+            // divided by the 250ms since the last SAMPLE rather than the time since the last
+            // CHANGE. That reports the rate multiplied by the ratio between the two, which is how
+            // a hull that regenerates 6.24/s measured a little over 30.
+            if (Math.Abs(power - _lastPower) < 0.001f) return;
+
             float prev = _lastPower;
             var prevAt = _lastPowerAt;
             _lastPower = power;
             _lastPowerAt = now;
-
-            if (prevAt == DateTime.MinValue) return;
 
             double dt = (now - prevAt).TotalSeconds;
             if (dt <= 0.05 || dt > MaxSampleGapSeconds) return;
