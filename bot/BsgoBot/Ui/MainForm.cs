@@ -54,6 +54,7 @@ public sealed class MainForm : Form
     private readonly ToggleChip _chipDefend = new("Fight back");
     private readonly ToggleChip _chipAvoidRocks = new("Dodge obstacles");
     private readonly ToggleChip _chipCatalogue = new("Fetch cards");
+    private readonly ToggleChip _chipAvoidPlayers = new("Dodge players");
     private readonly List<ToggleChip> _preyChips = [];
 
     private NumberField _numRange = null!;
@@ -64,6 +65,8 @@ public sealed class MainForm : Form
     private NumberField _numKeepOut = null!;
     private NumberField _numTravel = null!;
     private NumberField _numHull = null!;
+    private NumberField _numNpcKeepOut = null!;
+    private NumberField _numLocalTravel = null!;
 
     private Panel _header = null!;
     private Panel _viewHost = null!;
@@ -450,7 +453,7 @@ public sealed class MainForm : Form
         // beneath: 1 + ceil(13/2) = 8 rows. The old hardcoded 268 was 37px short — one row — and
         // that row was "Fetch cards", which is what learns a scanner's area flag and every
         // published range. An invisible switch is worse than a missing one.
-        const int chipCount = 15, chipsPerRow = 2, chipRow = 26 + 5, separator = 1 + 3 + 5;
+        const int chipCount = 16, chipsPerRow = 2, chipRow = 26 + 5, separator = 1 + 3 + 5;
         int chipRows = 1 + (chipCount - chipsPerRow + chipsPerRow - 1) / chipsPerRow;
         _controlHeight = chipRows * chipRow + separator + CardChrome;
         var flow = new FlowLayoutPanel
@@ -533,6 +536,11 @@ public sealed class MainForm : Form
         _chipCatalogue.CheckedChanged += (_, _) =>
             _bot.T.FetchCatalogue = _cfg.Tuning.FetchCatalogue = _chipCatalogue.Checked;
 
+        _chipAvoidPlayers.Tint = Theme.Bad;
+        _chipAvoidPlayers.Checked = _cfg.Tuning.AvoidPlayers;
+        _chipAvoidPlayers.CheckedChanged += (_, _) =>
+            _bot.T.AvoidPlayers = _cfg.Tuning.AvoidPlayers = _chipAvoidPlayers.Checked;
+
         // A break after the mode pair keeps "what am I doing" visually apart from "how".
         var brk = new Panel { Width = 10_000, Height = 1, BackColor = Theme.Card, Margin = new Padding(0, 3, 0, 5) };
 
@@ -540,7 +548,8 @@ public sealed class MainForm : Form
                  {
                      _chipCombat, _chipMining, brk as Control, _chipApproach, _chipBoost, _chipLoot,
                      _chipGunsOnRocks, _chipOptimal, _chipRepair, _chipAvoidRocks, _chipAvoidStations,
-                     _chipDefend, _chipPlayers, _chipAutoUndock, _chipHangarRepair, _chipCatalogue,
+                     _chipDefend, _chipPlayers, _chipAvoidPlayers, _chipAutoUndock, _chipHangarRepair,
+                     _chipCatalogue,
                  })
         {
             if (chip is ToggleChip c) c.Margin = new Padding(0, 0, 5, 5);
@@ -613,6 +622,18 @@ public sealed class MainForm : Form
         _numHull.ValueChanged += (_, _) =>
             _bot.T.HullRadius = _cfg.Tuning.HullRadius = _numHull.Value;
 
+        // Drones and NPC fighters, as opposed to the platforms KEEP OFF GUNS covers. 0 turns it
+        // off entirely, which is why this is a distance rather than a switch.
+        _numNpcKeepOut = new NumberField(0, 20000, 100, (int)_cfg.Tuning.HostileShipKeepOut, "u");
+        _numNpcKeepOut.ValueChanged += (_, _) =>
+            _bot.T.HostileShipKeepOut = _cfg.Tuning.HostileShipKeepOut = _numNpcKeepOut.Value;
+
+        // In seconds, because it is a question about time: how long a detour still counts as
+        // "here" when a known rock sits further out than an unknown one.
+        _numLocalTravel = new NumberField(0, 300, 5, (int)_cfg.Tuning.LocalTravelSeconds, "s");
+        _numLocalTravel.ValueChanged += (_, _) =>
+            _bot.T.LocalTravelSeconds = _cfg.Tuning.LocalTravelSeconds = _numLocalTravel.Value;
+
         // 0 means "work it out" — the automatic sources are all guesses of one kind or another,
         // so typing the real number in is the only way to be sure it flies at full speed.
         // These are the two numbers you read off the ship: cruise, and boost.
@@ -639,7 +660,8 @@ public sealed class MainForm : Form
 
         // The chip row must fit ALL of them, or the last is silently clipped off the bottom.
         // Three resources at two per rail-width is two rows of 30, with room for a fourth.
-        int[] heights = [18, 62, 30, 30, 30, 30, 30, 30, 30, 30];
+        // Caption, chip block, then one row per label/field pair. Ten pairs now.
+        int[] heights = [18, 62, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30];
         _tuningHeight = CardHeight(heights);
 
         card.Controls.Add(Rows(2, heights,
@@ -654,6 +676,8 @@ public sealed class MainForm : Form
             (RailCaption("GAP TO ROCK"), 1), (_numRock, 1),
             (RailCaption("SHIP HALF-SIZE"), 1), (_numHull, 1),
             (RailCaption("KEEP OFF GUNS"), 1), (_numKeepOut, 1),
+            (RailCaption("KEEP OFF NPCS"), 1), (_numNpcKeepOut, 1),
+            (RailCaption("LOCAL TRAVEL"), 1), (_numLocalTravel, 1),
             (RailCaption("CRUISE SPEED"), 1), (_numSpeed, 1),
             (RailCaption("BOOST SPEED"), 1), (_numBoost, 1),
             (RailCaption("FALLBACK REACH"), 1), (_numRange, 1)));
@@ -1200,11 +1224,14 @@ public sealed class MainForm : Form
         _chipHangarRepair.Checked = t.AutoRepair;
         _chipAvoidRocks.Checked = t.AvoidCollisions;
         _chipCatalogue.Checked = t.FetchCatalogue;
+        _chipAvoidPlayers.Checked = t.AvoidPlayers;
 
         _numRange.Value = (int)t.FallbackRange;
         _numRetreat.Value = (int)(t.RetreatHull * 100f);
         _numRock.Value = (int)t.AsteroidStandoff;
         _numHull.Value = (int)t.HullRadius;
+        _numNpcKeepOut.Value = (int)t.HostileShipKeepOut;
+        _numLocalTravel.Value = (int)t.LocalTravelSeconds;
         _numSpeed.Value = (int)t.TopSpeedOverride;
         _numBoost.Value = (int)t.BoostSpeedOverride;
         _numKeepOut.Value = (int)t.HostileStationKeepOut;
