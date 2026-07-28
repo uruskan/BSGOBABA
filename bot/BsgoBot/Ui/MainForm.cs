@@ -70,6 +70,7 @@ public sealed class MainForm : Form
     private NumberField _numNpcKeepOut = null!;
     private NumberField _numLocalTravel = null!;
     private NumberField _numTargetSector = null!;
+    private readonly FlatButton _btnSectorHere = new();
     private NumberField _numShipClass = null!;
 
     private Panel _header = null!;
@@ -648,11 +649,23 @@ public sealed class MainForm : Form
             _bot.T.LocalTravelSeconds = _cfg.Tuning.LocalTravelSeconds = _numLocalTravel.Value;
 
         // Where the farm belongs. 0 farms wherever the ship finds itself; any other value makes
-        // a respawn or undock in the wrong sector jump back before farming. The id is on the
-        // sector card in the log — it is announced on every dock, jump and respawn.
+        // a respawn or undock in the wrong sector jump back before farming. HERE takes the
+        // sector the ship is in right now, so the number never has to be read out of the log.
         _numTargetSector = new NumberField(0, 1_000_000, 1, (int)_cfg.Tuning.TargetSectorId, "");
         _numTargetSector.ValueChanged += (_, _) =>
             _bot.T.TargetSectorId = _cfg.Tuning.TargetSectorId = (uint)_numTargetSector.Value;
+
+        _btnSectorHere.Text = "Here";
+        _btnSectorHere.Width = 52;
+        _btnSectorHere.Margin = Padding.Empty;
+        _btnSectorHere.Click += (_, _) =>
+        {
+            if (_world.CurrentSectorId == 0)
+                AppendLog("The current sector isn't known yet — it is announced on a dock, "
+                        + "jump or respawn. Do one of those, then press Here again.");
+            else
+                _numTargetSector.Value = (int)_world.CurrentSectorId;
+        };
 
         // 0 reads it from the hull card. Only used to pick how much bigger than its own gun
         // spread the hull is assumed to be — a line ship is mostly hull with a few guns on it.
@@ -705,7 +718,7 @@ public sealed class MainForm : Form
             (RailCaption("KEEP OFF GUNS"), 1), (_numKeepOut, 1),
             (RailCaption("KEEP OFF NPCS"), 1), (_numNpcKeepOut, 1),
             (RailCaption("LOCAL TRAVEL"), 1), (_numLocalTravel, 1),
-            (RailCaption("TARGET SECTOR"), 1), (_numTargetSector, 1),
+            (RailCaption("TARGET SECTOR"), 1), (TargetSectorCell(), 1),
             (RailCaption("CRUISE SPEED"), 1), (_numSpeed, 1),
             (RailCaption("BOOST SPEED"), 1), (_numBoost, 1),
             (RailCaption("FALLBACK REACH"), 1), (_numRange, 1)));
@@ -996,6 +1009,18 @@ public sealed class MainForm : Form
     /// </summary>
     private static int CardHeight(int[] heights) =>
         heights.Sum() + heights.Length * RowGap + CardChrome;
+
+    /// <summary>The target-sector field with its HERE button beside it, sharing one grid cell.
+    /// Fill must sit at z-index 0 so the docked button takes its width first.</summary>
+    private Panel TargetSectorCell()
+    {
+        var cell = new Panel { BackColor = Theme.Card, Margin = Padding.Empty };
+        _numTargetSector.Dock = DockStyle.Fill;
+        _btnSectorHere.Dock = DockStyle.Right;
+        cell.Controls.Add(_numTargetSector);
+        cell.Controls.Add(_btnSectorHere);
+        return cell;
+    }
 
     private static TableLayoutPanel Rows(int columns, int[] heights,
                                          params (Control Control, int Span)[] cells)
