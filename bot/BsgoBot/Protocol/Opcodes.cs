@@ -503,6 +503,21 @@ public static class Resources
         [ResourceType.Tylium, ResourceType.Water, ResourceType.Titanium];
 
     public static bool IsMinable(ResourceType r) => Array.IndexOf(Minable, r) >= 0;
+
+    /// <summary>
+    /// What one unit of ore is worth in cubits, for pricing a farm run in one currency.
+    ///
+    /// Exchange arithmetic, not market data: water sells for 0.2 cubits a unit outright;
+    /// tylium has no sale price, but 1 cubit buys 10 tylium, so a mined unit is worth the
+    /// 0.1 cubits it saves; titanium trades 2:1 into tylium, so half of tylium's rate.
+    /// </summary>
+    public static double CubitsPerUnit(ResourceType r) => r switch
+    {
+        ResourceType.Water => 0.2,
+        ResourceType.Tylium => 0.1,
+        ResourceType.Titanium => 0.05,
+        _ => 0.0,
+    };
 }
 
 /// <summary>ItemFactory.ItemType — the tag byte in front of every serialised item.</summary>

@@ -38,6 +38,12 @@ public sealed class FarmSession
     [JsonIgnore]
     public long TotalGained => Gained.Values.Sum();
 
+    /// <summary>The run's ore priced in cubits (<see cref="Resources.CubitsPerUnit"/>), so a
+    /// tylium run and a water run compare on one number instead of three.</summary>
+    [JsonIgnore]
+    public double CubitValue => Resources.Minable.Sum(
+        m => Gained.GetValueOrDefault((uint)m) * Resources.CubitsPerUnit(m));
+
     public TimeSpan Duration(DateTime nowUtc) => (EndedUtc ?? nowUtc) - StartedUtc;
 
     public double? OrePerHour(DateTime nowUtc)

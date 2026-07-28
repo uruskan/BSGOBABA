@@ -31,6 +31,7 @@ public sealed class SessionsView : Control
         new("tylium", 80, true),
         new("water", 80, true),
         new("titanium", 80, true),
+        new("cubits", 70, true),
         new("other", 70, true),
         new("deaths", 52, true),
     ];
@@ -62,6 +63,11 @@ public sealed class SessionsView : Control
 
     private static string FmtCount(long n) =>
         n >= 1_000_000 ? $"{n / 1_000_000.0:F1}M" : n >= 10_000 ? $"{n / 1000.0:F1}k" : $"{n:N0}";
+
+    /// <summary>Cubit sums are fractional — a unit of ore is worth 0.05–0.2 — so small values
+    /// keep one decimal where the big ones borrow the count format.</summary>
+    private static string FmtCubits(double c) =>
+        c >= 10_000 ? FmtCount((long)c) : c >= 100 ? c.ToString("F0") : c.ToString("F1");
 
     protected override void OnMouseWheel(MouseEventArgs e)
     {
@@ -142,7 +148,7 @@ public sealed class SessionsView : Control
             headline = $"RUNNING for {FmtSpan(live.Duration(now))} — started "
                      + $"{live.StartedUtc.ToLocalTime():HH:mm}";
             string ore = live.OrePerHour(now) is { } oph ? $"{FmtCount((long)oph)} ore/h" : "measuring…";
-            detail = $"{FmtCount(live.Mined)} ore banked ({ore})"
+            detail = $"{FmtCount(live.Mined)} ore ≈ {FmtCubits(live.CubitValue)} cubits ({ore})"
                    + (live.Ship.Length > 0 ? $" — {live.Ship}" : "")
                    + (live.SectorId != 0 ? $" — sector {live.SectorId}" : "");
             tone = Theme.Good;
@@ -153,7 +159,8 @@ public sealed class SessionsView : Control
             headline = $"Stopped — last run {last.StartedUtc.ToLocalTime():MMM d HH:mm}, "
                      + $"ran {FmtSpan(last.Duration(now))}";
             string ore = last.OrePerHour(now) is { } oph ? $" ({FmtCount((long)oph)} ore/h)" : "";
-            detail = $"{FmtCount(last.Mined)} ore banked{ore} over {finished.Count} recorded run(s)";
+            detail = $"{FmtCount(last.Mined)} ore ≈ {FmtCubits(last.CubitValue)} cubits{ore} "
+                   + $"over {finished.Count} recorded run(s)";
             tone = Theme.Muted;
         }
         else
@@ -192,6 +199,7 @@ public sealed class SessionsView : Control
             (FmtCount(ty), ty > 0 ? Theme.Text : Theme.Faint),
             (FmtCount(wa), wa > 0 ? Theme.Text : Theme.Faint),
             (FmtCount(ti), ti > 0 ? Theme.Text : Theme.Faint),
+            (FmtCubits(s.CubitValue), s.CubitValue > 0 ? Theme.Accent : Theme.Faint),
             (FmtCount(other), other > 0 ? Theme.Warn : Theme.Faint),
             (s.Deaths.ToString(), s.Deaths > 0 ? Theme.Bad : Theme.Faint),
         };
