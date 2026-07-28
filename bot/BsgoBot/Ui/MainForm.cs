@@ -409,9 +409,13 @@ public sealed class MainForm : Form
         _btnSecond.Click += (_, _) => LaunchSecondInstance();
 
         var grid = Rows(2,
-            [15, 32, 15, 32, 32, 32, 32, 32, 32, 38],
+            // One entry per ROW, and Rows() sizes the grid from this array — a cell past the end
+            // lands in a row that does not exist and renders at zero height, which is how the ship
+            // picker shipped invisible. Adding a row here means growing the rail's own absolute
+            // height in BuildContent too.
+            [15, 32, 15, 32, 32, 15, 32, 32, 32, 32, 32, 32, 38],
             (RailCaption("SERVER"), 2), (_serverBox, 2),
-            (RailCaption("SHIP"), 2), (_shipBox, 2), (_btnAddShip, 4),
+            (RailCaption("SHIP"), 2), (_shipBox, 2), (_btnAddShip, 2),
             (RailCaption("CLIENT"), 2), (_clientBox, 2),
             (_btnProfiles, 1), (_btnLaunch, 1),
             (_btnCatch, 2),
@@ -615,7 +619,7 @@ public sealed class MainForm : Form
         card.Controls.Add(Rows(2,
             // The chip row must fit ALL of them, or the last is silently clipped off the bottom.
             // Three resources at two per rail-width is two rows of 30, with room for a fourth.
-            [18, 62, 30, 30, 30, 30, 30, 30, 30],
+            [18, 62, 30, 30, 30, 30, 30, 30, 30, 30],
             (RailCaption("MINE  (click in priority order)"), 2),
             (BuildResourceChips(), 2),
             (RailCaption("RETREAT AT HULL"), 1), (_numRetreat, 1),
@@ -790,12 +794,14 @@ public sealed class MainForm : Form
             Padding = new Padding(12, 10, 6, 10),
             AutoScroll = true,
         };
-        rail.RowStyles.Add(new RowStyle(SizeType.Absolute, 306));  // connection
-        rail.RowStyles.Add(new RowStyle(SizeType.Absolute, 268));  // control
-        // Must match BuildTuningCard's row heights (18 + 62 + seven 30s) plus the card's own 40px
+        // Connection: 15 + 32 for SERVER, the same again for SHIP plus a 32 button, 15 + 32 for
+        // CLIENT, six 32s of buttons and a 38 for Go farm, plus the card's own chrome.
+        rail.RowStyles.Add(new RowStyle(SizeType.Absolute, 306 + 79));  // connection
+        rail.RowStyles.Add(new RowStyle(SizeType.Absolute, 268));      // control
+        // Must match BuildTuningCard's row heights (18 + 62 + eight 30s) plus the card's own 40px
         // of chrome. Rows were added here before without this growing, which silently clipped the
         // last of them off the bottom of the panel.
-        rail.RowStyles.Add(new RowStyle(SizeType.Absolute, 18 + 62 + 7 * 30 + 40));  // tuning
+        rail.RowStyles.Add(new RowStyle(SizeType.Absolute, 18 + 62 + 8 * 30 + 40));  // tuning
         rail.RowStyles.Add(new RowStyle(SizeType.Percent, 100));   // slack, so nothing stretches
 
         rail.Controls.Add(BuildConnectionCard(), 0, 0);
