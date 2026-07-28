@@ -580,8 +580,16 @@ public sealed partial class FarmBot
             // written about a different hull is the most dangerous thing in the book — slot 3 is
             // damage control on a Raptor and something else entirely on a Vanir, and the bot
             // would fire it at its own hull on the strength of the old sentence.
+            //
+            // ConfirmedLoadout, never MyLoadout. The latter falls back to whichever hangar entry
+            // has the most fitted slots when the ship id does not resolve, which on an account
+            // owning a Vanir and a Raptor answers "Vanir" whichever one is in space. Comparing
+            // declarations against the wrong ship's guids withdraws every one of them — including
+            // the scanner's role and its 4,000u reach, after which the bot has no scanner and goes
+            // back to test-firing utility slots looking for one. A guess must not be grounds for
+            // destroying a fact.
             var stale = Weapons.DropStaleDeclarations(
-                id => _world.MyLoadout?.Slot(id)?.SystemGuid);
+                id => _world.ConfirmedLoadout?.Slot(id)?.SystemGuid);
             if (stale.Count > 0)
                 Log?.Invoke($"Loadout changed — {stale.Count} slot(s) hold a different item than "
                           + $"you described ({string.Join(", ", stale.Select(w => $"#{w.AbilityId}"))}). "

@@ -405,6 +405,32 @@ public sealed class WorldState
                 .ToList();
     }
 
+    /// <summary>
+    /// The loadout only when the server's own ship id names it — never the best-guess fallback.
+    ///
+    /// <see cref="MyLoadout"/> deliberately guesses when the id does not resolve, because a panel
+    /// showing the likeliest slot list beats a panel showing nothing. That guess is "the hangar
+    /// entry with the most fitted slots", which on an account owning a Vanir and a Raptor is the
+    /// Vanir whichever one is actually in space.
+    ///
+    /// <para>Fine for drawing. Not fine for <b>destroying</b> anything: a sweep that withdraws
+    /// your declarations because the guid disagrees will withdraw every one of them when handed
+    /// the wrong ship's slots, which is how a declared scanner — its role, its 4,000u reach —
+    /// vanished and the bot went back to probing utility slots to find one.</para>
+    ///
+    /// <para>So anything that invalidates what you typed asks for this instead, and does nothing
+    /// at all until the server has told us which ship we are in.</para>
+    /// </summary>
+    public ShipLoadout? ConfirmedLoadout
+    {
+        get
+        {
+            lock (_gate)
+                return MyShipId != 0 && _hangar.TryGetValue(MyShipId, out var mine)
+                    && mine.Slots().Any(s => s.Filled) ? mine : null;
+        }
+    }
+
     /// <summary>Slots of the ship I am flying. Empty rather than null, so callers can just loop.</summary>
     public List<ShipSlotInfo> MySlots() => MyLoadout?.Slots() ?? [];
 

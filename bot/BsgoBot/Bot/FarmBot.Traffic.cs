@@ -512,8 +512,14 @@ public sealed partial class FarmBot
         {
             float was = _scanProvenRange;
             _scanProvenRange = d;
+            // Worded as the floor it is. "Using that as the reach" read as a measurement of the
+            // scanner when it is only the furthest we happen to have proved so far — and it is
+            // printed at all ONLY when the published range has gone missing, so the line is really
+            // a symptom of that. Say so, because the cure is upstream.
             if (Scanner()?.MaxRange is not > 0 && d > was * 1.2f)
-                Log?.Invoke($"Scan answered from {d:F0}u — using that as the scanner's proven reach.");
+                Log?.Invoke($"Scan answered from {d:F0}u, so the scanner reaches at least that far "
+                          + "— no published range for it, so that floor is all there is to go on. "
+                          + "Declare its range in the loadout panel if you know it.");
         }
 
         ushort ability;
