@@ -67,6 +67,7 @@ public sealed class MainForm : Form
     private NumberField _numHull = null!;
     private NumberField _numNpcKeepOut = null!;
     private NumberField _numLocalTravel = null!;
+    private NumberField _numShipClass = null!;
 
     private Panel _header = null!;
     private Panel _viewHost = null!;
@@ -634,6 +635,12 @@ public sealed class MainForm : Form
         _numLocalTravel.ValueChanged += (_, _) =>
             _bot.T.LocalTravelSeconds = _cfg.Tuning.LocalTravelSeconds = _numLocalTravel.Value;
 
+        // 0 reads it from the hull card. Only used to pick how much bigger than its own gun
+        // spread the hull is assumed to be — a line ship is mostly hull with a few guns on it.
+        _numShipClass = new NumberField(0, 4, 1, _cfg.Tuning.ShipTierOverride, "");
+        _numShipClass.ValueChanged += (_, _) =>
+            _bot.T.ShipTierOverride = _cfg.Tuning.ShipTierOverride = (byte)_numShipClass.Value;
+
         // 0 means "work it out" — the automatic sources are all guesses of one kind or another,
         // so typing the real number in is the only way to be sure it flies at full speed.
         // These are the two numbers you read off the ship: cruise, and boost.
@@ -661,7 +668,7 @@ public sealed class MainForm : Form
         // The chip row must fit ALL of them, or the last is silently clipped off the bottom.
         // Three resources at two per rail-width is two rows of 30, with room for a fourth.
         // Caption, chip block, then one row per label/field pair. Ten pairs now.
-        int[] heights = [18, 62, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30];
+        int[] heights = [18, 62, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30];
         _tuningHeight = CardHeight(heights);
 
         card.Controls.Add(Rows(2, heights,
@@ -674,6 +681,7 @@ public sealed class MainForm : Form
             // from the rock's centre, which is why typing 50 into it did nothing.
             (RailCaption("TRAVEL FOR ORE"), 1), (_numTravel, 1),
             (RailCaption("GAP TO ROCK"), 1), (_numRock, 1),
+            (RailCaption("SHIP CLASS  1-4"), 1), (_numShipClass, 1),
             (RailCaption("SHIP HALF-SIZE"), 1), (_numHull, 1),
             (RailCaption("KEEP OFF GUNS"), 1), (_numKeepOut, 1),
             (RailCaption("KEEP OFF NPCS"), 1), (_numNpcKeepOut, 1),
@@ -1230,6 +1238,7 @@ public sealed class MainForm : Form
         _numRetreat.Value = (int)(t.RetreatHull * 100f);
         _numRock.Value = (int)t.AsteroidStandoff;
         _numHull.Value = (int)t.HullRadius;
+        _numShipClass.Value = t.ShipTierOverride;
         _numNpcKeepOut.Value = (int)t.HostileShipKeepOut;
         _numLocalTravel.Value = (int)t.LocalTravelSeconds;
         _numSpeed.Value = (int)t.TopSpeedOverride;

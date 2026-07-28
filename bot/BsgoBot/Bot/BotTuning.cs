@@ -258,6 +258,30 @@ public sealed class BotTuning
     public float HullRadius { get; set; }
 
     /// <summary>
+    /// Ship class when the catalogue has not said: 1 strike, 2 escort, 3 line, 4 capital.
+    /// 0 reads it from the hull card.
+    ///
+    /// Only used to pick a hull margin — see <see cref="HullMarginLine"/>. Worth setting by hand
+    /// when card fetching is off, since a line ship treated as a strike craft flies its bow
+    /// through rocks it believes it has cleared.
+    /// </summary>
+    public byte ShipTierOverride { get; set; }
+
+    /// <summary>How much bigger than its hardpoint spread an ESCORT hull is. 1 = no margin.</summary>
+    public float HullMarginEscort { get; set; } = 1.3f;
+
+    /// <summary>
+    /// How much bigger than its hardpoint spread a LINE or capital hull is. 1 = no margin.
+    ///
+    /// The spread reaches the outermost gun and the hull carries on past it, by an amount nothing
+    /// on the wire will ever state. A strike craft is barely longer than the span of its own
+    /// mounts and needs no margin at all; a line ship is mostly hull with a few guns on it, so the
+    /// same measurement understates it badly. Raise this if the bow keeps clipping things the bot
+    /// thought it had cleared.
+    /// </summary>
+    public float HullMarginLine { get; set; } = 1.6f;
+
+    /// <summary>
     /// The <b>closest</b> the ship will get to an asteroid's <b>surface</b>. The rock's own radius
     /// is added on top, so one number works for a 30u pebble and a 400u boulder alike.
     ///

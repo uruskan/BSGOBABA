@@ -641,9 +641,46 @@ public sealed partial class FarmBot
             if (guid == 0) return 0f;
             if (Cards.World(guid) is not { } card) return 0f;
 
-            return Math.Max(card.Radius, FurthestHardpoint(card));
+            return Math.Max(card.Radius, FurthestHardpoint(card)) * HullMargin;
         }
     }
+
+    /// <summary>
+    /// Ship class, 1 strike / 2 escort / 3 line / 4 capital, or 0 when nothing has said.
+    ///
+    /// The hull card's Tier. <see cref="BotTuning.ShipTierOverride"/> wins, because the card only
+    /// arrives with the catalogue and a bot that cannot fetch cards still has to fly.
+    /// </summary>
+    private byte MyTier
+    {
+        get
+        {
+            if (T.ShipTierOverride > 0) return T.ShipTierOverride;
+            uint guid = _world.Get(_world.MyObjectId)?.CardGuid ?? 0;
+            return guid == 0 ? (byte)0 : Cards.Ship(guid)?.Tier ?? 0;
+        }
+    }
+
+    /// <summary>
+    /// How much to add to the measured hardpoint spread, as a multiple of it.
+    ///
+    /// The spread is a lower bound: it reaches the outermost gun, and the hull carries on past it.
+    /// How much further is not something the wire will ever say — but it scales with class, and
+    /// badly. A strike craft is barely longer than the span of its own mounts, so it needs
+    /// nothing. A line ship is mostly hull with a few guns on it, and treating the last mount as
+    /// the nose is what flies the bow through a rock the bot thought it had cleared.
+    ///
+    /// Hence a multiplier by class rather than one number: 1.0 for strike, and
+    /// <see cref="BotTuning.HullMarginEscort"/> / <see cref="BotTuning.HullMarginLine"/> above it.
+    /// An unknown class gets no margin, which keeps the old behaviour rather than inflating every
+    /// clearance on a guess.
+    /// </summary>
+    private float HullMargin => MyTier switch
+    {
+        2 => Math.Max(1f, T.HullMarginEscort),
+        3 or 4 => Math.Max(1f, T.HullMarginLine),
+        _ => 1f,
+    };
 
     /// <summary>Which of the three sources <see cref="MyRadius"/> is actually using, in words,
     /// so the diagnostics can say whether the number is measured or merely assumed.</summary>
@@ -657,10 +694,20 @@ public sealed partial class FarmBot
             if (guid == 0 || Cards.World(guid) is not { } card)
                 return "UNKNOWN — no hull card yet, clearances are running on the margin alone";
 
+            string cls = MyTier switch
+            {
+                1 => "strike, no margin",
+                2 => $"escort, ×{T.HullMarginEscort:F2}",
+                3 => $"line, ×{T.HullMarginLine:F2}",
+                4 => $"capital, ×{T.HullMarginLine:F2}",
+                _ => "class UNKNOWN — no margin applied; set SHIP CLASS if this is an escort or line hull",
+            };
+
             float spots = FurthestHardpoint(card);
             if (spots > card.Radius)
-                return $"furthest of {card.Spots.Count} hardpoint(s); a lower bound, the hull "
-                     + $"runs past its outermost gun (card says {card.Radius:F0}u)";
+                return $"furthest of {card.Spots.Count} hardpoint(s) = {spots:F0}u, {cls}. "
+                     + $"A lower bound — the hull runs past its outermost gun "
+                     + $"(card radius {card.Radius:F0}u)";
 
             return card.Radius > 0f
                 ? $"the hull card's own radius ({card.Radius:F0}u) — no hardpoints to measure. "
