@@ -441,10 +441,18 @@ public sealed class MainForm : Form
     {
         var card = new Card("Control") { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 8) };
 
-        // Chips wrap, so this one cannot be derived from a row array the way the others are. It
-        // is measured off the rendered card rather than counted: eight rows of chips at 28 plus
-        // the mode row. Raise it if a chip is ever added and the last row goes missing.
-        _controlHeight = 268;
+        // Chips wrap two to a rail width, so the height follows from how many there are. Counted,
+        // not remembered: a hardcoded 268 here silently clipped "Fetch cards" off the bottom the
+        // moment the fourteenth chip pushed the flow onto an eighth row, which is the same way
+        // Go farm and the ship picker went missing.
+        // ToggleChip is 26 tall with a 5px margin, and two fit a rail width. The mode pair gets a
+        // row of its own because the separator under it spans the full width, so the rest wrap
+        // beneath: 1 + ceil(13/2) = 8 rows. The old hardcoded 268 was 37px short — one row — and
+        // that row was "Fetch cards", which is what learns a scanner's area flag and every
+        // published range. An invisible switch is worse than a missing one.
+        const int chipCount = 15, chipsPerRow = 2, chipRow = 26 + 5, separator = 1 + 3 + 5;
+        int chipRows = 1 + (chipCount - chipsPerRow + chipsPerRow - 1) / chipsPerRow;
+        _controlHeight = chipRows * chipRow + separator + CardChrome;
         var flow = new FlowLayoutPanel
         {
             Dock = DockStyle.Fill,
