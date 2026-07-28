@@ -35,6 +35,8 @@ public sealed class MainForm : Form
     private readonly SessionCatcher _catcher = new();
     private readonly DarkCombo _serverBox = new();
     private readonly DarkCombo _clientBox = new();
+    private readonly DarkCombo _shipBox = new();
+    private readonly FlatButton _btnAddShip = new();
     private readonly List<ToggleChip> _resourceChips = [];
 
     private readonly ToggleChip _chipCombat = new("Combat", true);
@@ -106,7 +108,7 @@ public sealed class MainForm : Form
         _bot = new FarmBot(_world, _actions, _proxy);
         _map = new MapPanel(_world, _bot) { Dock = DockStyle.Fill };
         _contacts = new ContactList(_world, _bot, _actions) { Dock = DockStyle.Fill };
-        _loadout = new LoadoutView(_world, _bot, () => _cfg.CurrentServer?.Slots ?? _noSlots)
+        _loadout = new LoadoutView(_world, _bot, () => _cfg.CurrentServer?.CurrentShip.Slots ?? _noSlots)
         {
             Dock = DockStyle.Fill,
         };
@@ -120,7 +122,7 @@ public sealed class MainForm : Form
         _contacts.Log += AppendLog;
         _loadout.Changed += () =>
         {
-            if (_cfg.CurrentServer is { } srv) srv.WeaponHexes = _loadout.WeaponHexes;
+            if (_cfg.CurrentServer is { } srv) srv.CurrentShip.WeaponHexes = _loadout.WeaponHexes;
             ApplyLoadout();
             _cfg.Save();
         };
@@ -194,12 +196,12 @@ public sealed class MainForm : Form
         if (s.NumericPlayerId != 0)
             _world.SeedPlayerId(s.NumericPlayerId, "your server profile");
 
-        _bot.Weapons.Restore(s.Weapons.Select(w =>
+        _bot.Weapons.Restore(s.CurrentShip.Weapons.Select(w =>
             ((ushort)w.AbilityId, (WeaponKind)w.Kind, (WeaponRole)w.Role, w.Enabled)));
 
         // Gun count is per ship, so it travels with the profile. Set before the declarations are
         // pushed: it decides which hexes count as weapon hexes and how the bar is numbered.
-        _loadout.WeaponHexes = s.WeaponHexes;
+        _loadout.WeaponHexes = s.CurrentShip.WeaponHexes;
 
         // After Restore, not before: what you declared outranks what was merely remembered.
         ApplyLoadout();
@@ -217,7 +219,7 @@ public sealed class MainForm : Form
         var s = _cfg.CurrentServer;
         if (s is null) return;
 
-        _bot.Weapons.SyncDeclarations(s.Slots
+        _bot.Weapons.SyncDeclarations(s.CurrentShip.Slots
             .Where(d => d.Bound)           // a labelled hex with nothing behind it
             .Select(d =>
             {
@@ -235,7 +237,7 @@ public sealed class MainForm : Form
     {
         var s = _cfg.CurrentServer;
         if (s is null) return;
-        s.Weapons = _bot.Weapons.All().Select(w => new SavedWeapon
+        s.CurrentShip.Weapons = _bot.Weapons.All().Select(w => new SavedWeapon
         {
             AbilityId = w.AbilityId,
             Kind = (int)w.Kind,
@@ -256,7 +258,7 @@ public sealed class MainForm : Form
     /// migrations that used to sit here moved to <c>Config.MigrateTuning</c>, which runs on load
     /// and is where anything reading an outdated bot.json belongs.
     /// </summary>
-    private void ApplySettingsToBot() => _bot.T = _cfg.Bot;
+    private void ApplySettingsToBot() => _bot.T = _cfg.Tuning;
 
     /// <summary>
     /// Rebuilds the mining filter from the chips, preserving the order they were switched ON —
@@ -264,7 +266,7 @@ public sealed class MainForm : Form
     /// </summary>
     private void ApplyResources()
     {
-        // No copy back into the config: _bot.T and _cfg.Bot are the same object now.
+        // No copy back into the config: _bot.T and _cfg.Tuning are the same object now.
         foreach (var chip in _resourceChips) RankChip(chip);
     }
 
@@ -370,6 +372,9 @@ public sealed class MainForm : Form
         var card = new Card("Connection") { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 8) };
 
         _serverBox.SelectedIndexChanged += (_, _) => OnServerChanged();
+        _shipBox.SelectedIndexChanged += (_, _) => OnShipChanged();
+        _btnAddShip.Text = "Add ship";
+        _btnAddShip.Click += (_, _) => AddShip();
         _clientBox.SelectedIndexChanged += (_, _) =>
         {
             if (!_suppressProfileEvents && _clientBox.SelectedIndex >= 0)
@@ -405,6 +410,7 @@ public sealed class MainForm : Form
         var grid = Rows(2,
             [15, 32, 15, 32, 32, 32, 32, 32, 32, 38],
             (RailCaption("SERVER"), 2), (_serverBox, 2),
+            (RailCaption("SHIP"), 2), (_shipBox, 2), (_btnAddShip, 4),
             (RailCaption("CLIENT"), 2), (_clientBox, 2),
             (_btnProfiles, 1), (_btnLaunch, 1),
             (_btnCatch, 2),
@@ -437,69 +443,69 @@ public sealed class MainForm : Form
         _chipCombat.Checked = _bot.T.Mode == FarmMode.Combat;
         _chipMining.Checked = _bot.T.Mode == FarmMode.Mining;
 
-        _chipApproach.Checked = _cfg.Bot.AutoApproach;
+        _chipApproach.Checked = _cfg.Tuning.AutoApproach;
         _chipApproach.CheckedChanged += (_, _) =>
-            _bot.T.AutoApproach = _cfg.Bot.AutoApproach = _chipApproach.Checked;
+            _bot.T.AutoApproach = _cfg.Tuning.AutoApproach = _chipApproach.Checked;
 
         _chipBoost.Tint = Theme.Warn;
-        _chipBoost.Checked = _cfg.Bot.UseBoost;
+        _chipBoost.Checked = _cfg.Tuning.UseBoost;
         _chipBoost.CheckedChanged += (_, _) =>
-            _bot.T.UseBoost = _cfg.Bot.UseBoost = _chipBoost.Checked;
+            _bot.T.UseBoost = _cfg.Tuning.UseBoost = _chipBoost.Checked;
 
-        _chipLoot.Checked = _cfg.Bot.AutoLoot;
+        _chipLoot.Checked = _cfg.Tuning.AutoLoot;
         _chipLoot.CheckedChanged += (_, _) =>
-            _bot.T.AutoLoot = _cfg.Bot.AutoLoot = _chipLoot.Checked;
+            _bot.T.AutoLoot = _cfg.Tuning.AutoLoot = _chipLoot.Checked;
 
         _chipPlayers.Tint = Theme.Bad;
-        _chipPlayers.Checked = _cfg.Bot.AttackPlayers;
+        _chipPlayers.Checked = _cfg.Tuning.AttackPlayers;
         _chipPlayers.CheckedChanged += (_, _) =>
-            _bot.T.AttackPlayers = _cfg.Bot.AttackPlayers = _chipPlayers.Checked;
+            _bot.T.AttackPlayers = _cfg.Tuning.AttackPlayers = _chipPlayers.Checked;
 
         _chipGunsOnRocks.Tint = Theme.Warn;
-        _chipGunsOnRocks.Checked = _cfg.Bot.FireGunsWhileMining;
+        _chipGunsOnRocks.Checked = _cfg.Tuning.FireGunsWhileMining;
         _chipGunsOnRocks.CheckedChanged += (_, _) =>
-            _bot.T.FireGunsWhileMining = _cfg.Bot.FireGunsWhileMining = _chipGunsOnRocks.Checked;
+            _bot.T.FireGunsWhileMining = _cfg.Tuning.FireGunsWhileMining = _chipGunsOnRocks.Checked;
 
         _chipDefend.Tint = Theme.Bad;
-        _chipDefend.Checked = _cfg.Bot.DefendSelf;
+        _chipDefend.Checked = _cfg.Tuning.DefendSelf;
         _chipDefend.CheckedChanged += (_, _) =>
-            _bot.T.DefendSelf = _cfg.Bot.DefendSelf = _chipDefend.Checked;
+            _bot.T.DefendSelf = _cfg.Tuning.DefendSelf = _chipDefend.Checked;
 
-        _chipOptimal.Checked = _cfg.Bot.HoldFireUntilOptimal;
+        _chipOptimal.Checked = _cfg.Tuning.HoldFireUntilOptimal;
         _chipOptimal.CheckedChanged += (_, _) =>
-            _bot.T.HoldFireUntilOptimal = _cfg.Bot.HoldFireUntilOptimal = _chipOptimal.Checked;
+            _bot.T.HoldFireUntilOptimal = _cfg.Tuning.HoldFireUntilOptimal = _chipOptimal.Checked;
 
         _chipAvoidStations.Tint = Theme.Bad;
-        _chipAvoidStations.Checked = _cfg.Bot.AvoidHostileStations;
+        _chipAvoidStations.Checked = _cfg.Tuning.AvoidHostileStations;
         _chipAvoidStations.CheckedChanged += (_, _) =>
-            _bot.T.AvoidHostileStations = _cfg.Bot.AvoidHostileStations = _chipAvoidStations.Checked;
+            _bot.T.AvoidHostileStations = _cfg.Tuning.AvoidHostileStations = _chipAvoidStations.Checked;
 
-        _chipRepair.Checked = _cfg.Bot.UseRepairAbility;
+        _chipRepair.Checked = _cfg.Tuning.UseRepairAbility;
         _chipRepair.CheckedChanged += (_, _) =>
-            _bot.T.UseRepairAbility = _cfg.Bot.UseRepairAbility = _chipRepair.Checked;
+            _bot.T.UseRepairAbility = _cfg.Tuning.UseRepairAbility = _chipRepair.Checked;
 
         // What happens after a death: launch again, and pay to patch the hull before doing it.
-        _chipAutoUndock.Checked = _cfg.Bot.AutoUndock;
+        _chipAutoUndock.Checked = _cfg.Tuning.AutoUndock;
         _chipAutoUndock.CheckedChanged += (_, _) =>
-            _bot.T.AutoUndock = _cfg.Bot.AutoUndock = _chipAutoUndock.Checked;
+            _bot.T.AutoUndock = _cfg.Tuning.AutoUndock = _chipAutoUndock.Checked;
 
         // Warn-tinted: it is the one switch that spends a resource on its own.
         _chipHangarRepair.Tint = Theme.Warn;
-        _chipHangarRepair.Checked = _cfg.Bot.AutoRepair;
+        _chipHangarRepair.Checked = _cfg.Tuning.AutoRepair;
         _chipHangarRepair.CheckedChanged += (_, _) =>
             _bot.T.AutoRepair = _chipHangarRepair.Checked;
 
         _chipAvoidRocks.Tint = Theme.Bad;
-        _chipAvoidRocks.Checked = _cfg.Bot.AvoidCollisions;
+        _chipAvoidRocks.Checked = _cfg.Tuning.AvoidCollisions;
         _chipAvoidRocks.CheckedChanged += (_, _) =>
-            _bot.T.AvoidCollisions = _cfg.Bot.AvoidCollisions = _chipAvoidRocks.Checked;
+            _bot.T.AvoidCollisions = _cfg.Tuning.AvoidCollisions = _chipAvoidRocks.Checked;
 
         // Warn-tinted: this is the one switch that puts traffic on the wire the real client never
         // sent, so it is the one to turn off first if the session starts dropping.
         _chipCatalogue.Tint = Theme.Warn;
-        _chipCatalogue.Checked = _cfg.Bot.FetchCatalogue;
+        _chipCatalogue.Checked = _cfg.Tuning.FetchCatalogue;
         _chipCatalogue.CheckedChanged += (_, _) =>
-            _bot.T.FetchCatalogue = _cfg.Bot.FetchCatalogue = _chipCatalogue.Checked;
+            _bot.T.FetchCatalogue = _cfg.Tuning.FetchCatalogue = _chipCatalogue.Checked;
 
         // A break after the mode pair keeps "what am I doing" visually apart from "how".
         var brk = new Panel { Width = 10_000, Height = 1, BackColor = Theme.Card, Margin = new Padding(0, 3, 0, 5) };
@@ -562,42 +568,42 @@ public sealed class MainForm : Form
     {
         var card = new Card("Tuning") { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 8) };
 
-        _numRange = new NumberField(100, 50000, 100, (int)_cfg.Bot.FallbackRange, "u");
+        _numRange = new NumberField(100, 50000, 100, (int)_cfg.Tuning.FallbackRange, "u");
         _numRange.ValueChanged += (_, _) =>
-            _bot.T.FallbackRange = _cfg.Bot.FallbackRange = _numRange.Value;
+            _bot.T.FallbackRange = _cfg.Tuning.FallbackRange = _numRange.Value;
 
-        _numRetreat = new NumberField(0, 95, 5, (int)(_cfg.Bot.RetreatHull * 100f), "%");
+        _numRetreat = new NumberField(0, 95, 5, (int)(_cfg.Tuning.RetreatHull * 100f), "%");
         _numRetreat.ValueChanged += (_, _) =>
-            _bot.T.RetreatHull = _cfg.Bot.RetreatHull = _numRetreat.Value / 100f;
+            _bot.T.RetreatHull = _cfg.Tuning.RetreatHull = _numRetreat.Value / 100f;
 
         // From the rock's surface now, so the useful range starts much lower than it used to.
-        _numRock = new NumberField(0, 5000, 10, (int)_cfg.Bot.AsteroidStandoff, "u");
+        _numRock = new NumberField(0, 5000, 10, (int)_cfg.Tuning.AsteroidStandoff, "u");
         _numRock.ValueChanged += (_, _) =>
-            _bot.T.AsteroidStandoff = _cfg.Bot.AsteroidStandoff = _numRock.Value;
+            _bot.T.AsteroidStandoff = _cfg.Tuning.AsteroidStandoff = _numRock.Value;
 
         // 0 means "work it out" — the automatic sources are all guesses of one kind or another,
         // so typing the real number in is the only way to be sure it flies at full speed.
         // These are the two numbers you read off the ship: cruise, and boost.
-        _numSpeed = new NumberField(0, 2000, 5, (int)_cfg.Bot.TopSpeedOverride, "u/s");
+        _numSpeed = new NumberField(0, 2000, 5, (int)_cfg.Tuning.TopSpeedOverride, "u/s");
         _numSpeed.ValueChanged += (_, _) =>
-            _bot.T.TopSpeedOverride = _cfg.Bot.TopSpeedOverride = _numSpeed.Value;
+            _bot.T.TopSpeedOverride = _cfg.Tuning.TopSpeedOverride = _numSpeed.Value;
 
-        _numBoost = new NumberField(0, 2000, 5, (int)_cfg.Bot.BoostSpeedOverride, "u/s");
+        _numBoost = new NumberField(0, 2000, 5, (int)_cfg.Tuning.BoostSpeedOverride, "u/s");
         _numBoost.ValueChanged += (_, _) =>
-            _bot.T.BoostSpeedOverride = _cfg.Bot.BoostSpeedOverride = _numBoost.Value;
+            _bot.T.BoostSpeedOverride = _cfg.Tuning.BoostSpeedOverride = _numBoost.Value;
 
 
         // Guessed, never published — the server states no reach for an emplacement, so this is
         // the one number you genuinely have to tune by being shot at. Live, not via bot.json.
-        _numKeepOut = new NumberField(0, 20000, 100, (int)_cfg.Bot.HostileStationKeepOut, "u");
+        _numKeepOut = new NumberField(0, 20000, 100, (int)_cfg.Tuning.HostileStationKeepOut, "u");
         _numKeepOut.ValueChanged += (_, _) =>
-            _bot.T.HostileStationKeepOut = _cfg.Bot.HostileStationKeepOut = _numKeepOut.Value;
+            _bot.T.HostileStationKeepOut = _cfg.Tuning.HostileStationKeepOut = _numKeepOut.Value;
 
         // How far the ship will range for a richer rock. Squared falloff, so this is the distance
         // at which a rock counts for half its ore — small changes here move the behaviour a lot.
-        _numTravel = new NumberField(100, 20000, 50, (int)_cfg.Bot.RockTravelPenalty, "u");
+        _numTravel = new NumberField(100, 20000, 50, (int)_cfg.Tuning.RockTravelPenalty, "u");
         _numTravel.ValueChanged += (_, _) =>
-            _bot.T.RockTravelPenalty = _cfg.Bot.RockTravelPenalty = _numTravel.Value;
+            _bot.T.RockTravelPenalty = _cfg.Tuning.RockTravelPenalty = _numTravel.Value;
 
         card.Controls.Add(Rows(2,
             // The chip row must fit ALL of them, or the last is silently clipped off the bottom.
@@ -821,7 +827,7 @@ public sealed class MainForm : Form
         };
         foreach (var t in PreyChoices)
         {
-            var chip = new ToggleChip(t.ToString(), _cfg.Bot.Prey.Contains(t))
+            var chip = new ToggleChip(t.ToString(), _cfg.Tuning.Prey.Contains(t))
             {
                 Tag2 = t,
                 Margin = new Padding(0, 0, 5, 5),
@@ -1055,11 +1061,124 @@ public sealed class MainForm : Form
             foreach (var c in _cfg.Clients) _clientBox.Items.Add(c);
             if (_cfg.Clients.Count > 0)
                 _clientBox.SelectedIndex = Math.Clamp(_cfg.SelectedClient, 0, _cfg.Clients.Count - 1);
+
+            _shipBox.Items.Clear();
+            if (_cfg.CurrentServer is { } srv)
+            {
+                // Touch CurrentShip first: it is what guarantees the list is never empty, and an
+                // empty ship box would be a dropdown you cannot select your way out of.
+                _ = srv.CurrentShip;
+                foreach (var ship in srv.Ships) _shipBox.Items.Add(ship);
+                _shipBox.SelectedIndex = Math.Clamp(srv.SelectedShip, 0, srv.Ships.Count - 1);
+            }
         }
         finally
         {
             _suppressProfileEvents = false;
         }
+    }
+
+    /// <summary>
+    /// Switches to another of your ships: its tuning, its slots, its learned ability ids.
+    ///
+    /// Deliberately manual. The server does say which ship is active, but acting on that would
+    /// mean a wrong guess silently flying the Raptor's collision margins on a Vanir, and the
+    /// failure would look like bad piloting rather than a wrong profile.
+    /// </summary>
+    private void OnShipChanged()
+    {
+        if (_suppressProfileEvents || _shipBox.SelectedIndex < 0) return;
+        if (_cfg.CurrentServer is not { } srv) return;
+        if (_shipBox.SelectedIndex == srv.SelectedShip) return;
+
+        SaveWeapons();                       // against the ship we are leaving
+        srv.SelectedShip = _shipBox.SelectedIndex;
+
+        var ship = srv.CurrentShip;
+
+        // Snapshot first. Setting a chip or a number below raises its Changed event, and those
+        // handlers write straight into the live tuning — which is now this ship's. Without this,
+        // loading the controls would stamp the OUTGOING ship's values onto the incoming one, and
+        // the corruption would look exactly like the profile never having been saved.
+        var truth = Config.CloneTuning(ship.Tuning);
+        LoadControlsFromTuning(ship.Tuning);
+        ship.Tuning = truth;
+
+        _bot.T = ship.Tuning;
+        _bot.Weapons.Clear();
+        AdoptServerIdentity();               // restores this ship's weapons, hexes and loadout
+        _loadout.Reload();
+        foreach (var chip in _resourceChips) RankChip(chip);
+        _cfg.Save();
+
+        AppendLog($"Flying \"{ship.Name}\" — its own tuning, slots and learned abilities. "
+                + $"Gap to rock {ship.Tuning.AsteroidStandoff:F0}u, "
+                + $"clip-through under {ship.Tuning.IgnoreCollisionHullFraction:P0} of hull.");
+    }
+
+    /// <summary>
+    /// Pushes a tuning's values back out into every control that shows one.
+    ///
+    /// The counterpart to the handlers, which only ever run the other way. Nothing called this
+    /// before because there was one tuning for the life of the window; switching ships is the
+    /// first thing that can change it underneath the UI.
+    /// </summary>
+    private void LoadControlsFromTuning(BotTuning t)
+    {
+        _chipCombat.Checked = t.Mode == FarmMode.Combat;
+        _chipMining.Checked = t.Mode == FarmMode.Mining;
+
+        _chipApproach.Checked = t.AutoApproach;
+        _chipBoost.Checked = t.UseBoost;
+        _chipLoot.Checked = t.AutoLoot;
+        _chipPlayers.Checked = t.AttackPlayers;
+        _chipGunsOnRocks.Checked = t.FireGunsWhileMining;
+        _chipDefend.Checked = t.DefendSelf;
+        _chipOptimal.Checked = t.HoldFireUntilOptimal;
+        _chipAvoidStations.Checked = t.AvoidHostileStations;
+        _chipRepair.Checked = t.UseRepairAbility;
+        _chipAutoUndock.Checked = t.AutoUndock;
+        _chipHangarRepair.Checked = t.AutoRepair;
+        _chipAvoidRocks.Checked = t.AvoidCollisions;
+        _chipCatalogue.Checked = t.FetchCatalogue;
+
+        _numRange.Value = (int)t.FallbackRange;
+        _numRetreat.Value = (int)(t.RetreatHull * 100f);
+        _numRock.Value = (int)t.AsteroidStandoff;
+        _numSpeed.Value = (int)t.TopSpeedOverride;
+        _numBoost.Value = (int)t.BoostSpeedOverride;
+        _numKeepOut.Value = (int)t.HostileStationKeepOut;
+        _numTravel.Value = (int)t.RockTravelPenalty;
+
+        foreach (var chip in _preyChips)
+            if (chip.Tag2 is SpaceEntityType prey) chip.Checked = t.Prey.Contains(prey);
+
+        foreach (var chip in _resourceChips)
+            if (chip.Tag2 is ResourceType res) chip.Checked = t.WantedResources.Contains(res);
+    }
+
+    /// <summary>Adds a ship, starting from the current one's tuning rather than from defaults —
+    /// most of what you learned about flying one hull still applies to the next.</summary>
+    private void AddShip()
+    {
+        if (_cfg.CurrentServer is not { } srv) return;
+
+        string? name = Widgets.Prompt(this, "New ship", "Name this ship (e.g. Advanced Vanir)");
+        if (string.IsNullOrWhiteSpace(name)) return;
+
+        SaveWeapons();
+        var ship = _cfg.DuplicateCurrentShip(name.Trim());
+        srv.SelectedShip = srv.Ships.IndexOf(ship);
+
+        _bot.T = ship.Tuning;
+        _bot.Weapons.Clear();
+        _loadout.Reload();
+        RefreshProfileBoxes();
+        _cfg.Save();
+
+        AppendLog($"Added \"{ship.Name}\", copying the previous ship's tuning. Its slots and "
+                + "ability ids start empty on purpose — slot 4 on one hull is not slot 4 on "
+                + "another. Fire each weapon once, or let the catalogue fill them in.");
     }
 
     private void OnServerChanged()
@@ -1074,8 +1193,20 @@ public sealed class MainForm : Form
         _proxy.SetUpstream(s.Host, s.Port);
         _world.Clear();
         _bot.Weapons.Clear();
+
+        // Ships belong to a server, so the list and the tuning both change underneath us. Same
+        // snapshot-and-restore as OnShipChanged, for the same reason: loading the controls fires
+        // their handlers, and those write into whatever tuning is live by then.
+        var ship = s.CurrentShip;
+        var truth = Config.CloneTuning(ship.Tuning);
+        LoadControlsFromTuning(ship.Tuning);
+        ship.Tuning = truth;
+        _bot.T = ship.Tuning;
+
         AdoptServerIdentity();
         _loadout.Reload();
+        RefreshProfileBoxes();
+        foreach (var chip in _resourceChips) RankChip(chip);
 
         _serverReachable = "checking";
         _ = CheckServerAsync();

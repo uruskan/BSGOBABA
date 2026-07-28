@@ -73,6 +73,41 @@ public sealed class SavedSlot
     public uint SystemGuid { get; set; }
 }
 
+/// <summary>
+/// One of your ships, and everything that is true about flying it.
+///
+/// Ships disagree about nearly every number the bot has. A Raptor wants to be shoved out of the
+/// way of every rock it passes; a Vanir carries 4,500 hull and regenerates 35 a second, so the
+/// same rock is cheaper hit than avoided. A Gopher's optimal range is 250u and a Badger's is 688.
+/// One of those settings being right has always meant the other being wrong, because there was
+/// only ever one of each.
+///
+/// <para>So the tuning, the slot descriptions and the learned ability ids travel together under a
+/// name you pick, and switching ship is picking a different name. Nothing about it is automatic —
+/// the server does tell us which ship is active, but a wrong guess here silently flies the wrong
+/// ship's settings, which is worse than a dropdown.</para>
+/// </summary>
+public sealed class ShipProfile
+{
+    public string Name { get; set; } = "New ship";
+
+    /// <summary>Everything about how this ship is flown. See <see cref="BotTuning"/>.</summary>
+    public BotTuning Tuning { get; set; } = new();
+
+    /// <summary>Ability ids the bot learned for this ship. They are per-ship, not per-account:
+    /// slot 4 on a Vanir and slot 4 on a Raptor are different guns.</summary>
+    public List<SavedWeapon> Weapons { get; set; } = [];
+
+    /// <summary>This ship's loadout as you described it in the panel.</summary>
+    public List<SavedSlot> Slots { get; set; } = [];
+
+    /// <summary>How many hexes sit above the hull for weapons, which is how many gun slots this
+    /// ship has. A Vanir has eight; a Raptor has four.</summary>
+    public int WeaponHexes { get; set; } = 4;
+
+    public override string ToString() => Name;
+}
+
 /// <summary>A game server you can point the proxy at. Account lives here because
 /// player ids and session codes are per-server, not per-client.</summary>
 public sealed class ServerProfile
@@ -84,25 +119,51 @@ public sealed class ServerProfile
     public string Session { get; set; } = "";
     public string Language { get; set; } = "en";
 
+    /// <summary>The ships you fly on this server. Never empty after a load — see
+    /// <see cref="CurrentShip"/>.</summary>
+    [System.ComponentModel.Browsable(false)]
+    public List<ShipProfile> Ships { get; set; } = [];
+
+    /// <summary>Which entry of <see cref="Ships"/> is being flown. Yours to set; nothing
+    /// changes it by itself.</summary>
+    [System.ComponentModel.Browsable(false)]
+    public int SelectedShip { get; set; }
+
     /// <summary>
-    /// How many hexes sit above the hull for weapons, which is how many gun slots this ship has.
+    /// The ship currently selected, creating one if the list is somehow empty.
     ///
-    /// Stated, not detected: <c>Reply.Slots</c> carries a slot's id, its installed system guid and
-    /// whether it is inoperable, and nothing at all about what KIND of slot it is — that lives in
-    /// the catalogue, which the bot never reads. Hardcoding four numbered a three-gun ship's
-    /// ability bar from 5.
+    /// Never returns null, because every caller would otherwise need a fallback and they would
+    /// not all pick the same one — a half-configured bot flying on defaults it never announced
+    /// is exactly the failure this whole structure exists to prevent.
     /// </summary>
-    public int WeaponHexes { get; set; } = 4;
-
-    /// <summary>Weapon ability ids are per-ship and per-server, so they live here.
-    /// Hidden from the profiles grid — it's machine state, not something you type in.</summary>
     [System.ComponentModel.Browsable(false)]
-    public List<SavedWeapon> Weapons { get; set; } = [];
+    [System.Text.Json.Serialization.JsonIgnore]
+    public ShipProfile CurrentShip
+    {
+        get
+        {
+            if (Ships.Count == 0) Ships.Add(new ShipProfile { Name = "Ship 1" });
+            if (SelectedShip < 0 || SelectedShip >= Ships.Count) SelectedShip = 0;
+            return Ships[SelectedShip];
+        }
+    }
 
-    /// <summary>Your ship's loadout as you described it. Per-server for the same reason the
-    /// weapons are: slot ids belong to a ship on a server, not to you.</summary>
+    // ---- pre-ship-profile bot.json, migrated on load and then dropped ------------------
+
+    /// <summary>What <see cref="ShipProfile.WeaponHexes"/> was before ships had profiles.</summary>
     [System.ComponentModel.Browsable(false)]
-    public List<SavedSlot> Slots { get; set; } = [];
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? WeaponHexes { get; set; }
+
+    /// <summary>What <see cref="ShipProfile.Weapons"/> was before ships had profiles.</summary>
+    [System.ComponentModel.Browsable(false)]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<SavedWeapon>? Weapons { get; set; }
+
+    /// <summary>What <see cref="ShipProfile.Slots"/> was before ships had profiles.</summary>
+    [System.ComponentModel.Browsable(false)]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<SavedSlot>? Slots { get; set; }
 
     /// <summary>Parsed <see cref="PlayerId"/>, or 0 if it isn't a number.</summary>
     [System.ComponentModel.Browsable(false)]
@@ -132,14 +193,25 @@ public sealed class Config
     public bool AutoStartProxy { get; set; } = true;
 
     /// <summary>
-    /// Everything you can tune about how the farm loop behaves.
+    /// The tuning of the ship you are currently flying, which is the object the running bot flies
+    /// on — <c>MainForm</c> assigns it straight to <see cref="Bot.FarmBot.T"/> rather than copying
+    /// it property by property.
     ///
-    /// This is the same object the running bot flies on — <c>MainForm</c> assigns it straight to
-    /// <see cref="Bot.FarmBot.T"/> rather than copying it property by property, which is what
-    /// this used to be: a parallel <c>BotSettings</c> class listing 47 of the bot's 77 settings,
-    /// hand-copied across on every load. The other 30 were unreachable from this file entirely.
+    /// <para>Computed, not stored. It lives on the selected <see cref="ShipProfile"/>, because one
+    /// global set of numbers cannot be right for a strike ship and a line ship at once — which is
+    /// what it used to be, and why tuning the Vanir quietly detuned the Raptor.</para>
     /// </summary>
-    public BotTuning Bot { get; set; } = new();
+    [System.Text.Json.Serialization.JsonIgnore]
+    public BotTuning Tuning => CurrentServer?.CurrentShip.Tuning ?? _orphanTuning;
+
+    /// <summary>Somewhere for the settings to live when no server profile is selected, so the UI
+    /// is still constructible instead of needing a null check on every binding.</summary>
+    private readonly BotTuning _orphanTuning = new();
+
+    /// <summary>The single global tuning bot.json held before ships had profiles. Folded into the
+    /// first ship on load and then dropped from the file.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public BotTuning? Bot { get; set; }
 
     public List<ServerProfile> Servers { get; set; } = [];
     public List<ClientProfile> Clients { get; set; } = [];
@@ -195,9 +267,77 @@ public sealed class Config
         }
 
         cfg.SeedDefaults();
+        cfg.MigrateToShipProfiles();
         cfg.MigrateUnboundSlots();
         cfg.MigrateTuning();
         return cfg;
+    }
+
+    /// <summary>
+    /// Folds a pre-ship-profile bot.json into one ship per server.
+    ///
+    /// Everything the file used to hold globally — the tuning — and per-server — the slots, the
+    /// learned ability ids, the hex count — described exactly one ship, because that is all the
+    /// bot could fly. So each server gets a single ship carrying all of it, and nothing is lost:
+    /// the setup you had keeps working, under a name, with room beside it for the next hull.
+    ///
+    /// <para>The tuning is <b>copied</b> per server rather than shared. Two servers holding the
+    /// same object would have looked fine until the day changing one silently changed the other.</para>
+    /// </summary>
+    private void MigrateToShipProfiles()
+    {
+        foreach (var server in Servers)
+        {
+            if (server.Ships.Count > 0) continue;
+
+            server.Ships.Add(new ShipProfile
+            {
+                // Named for what it is rather than "Ship 1": whatever you were flying when this
+                // build first ran is the ship these settings were tuned for.
+                Name = "Original setup",
+                Tuning = CloneTuning(Bot),
+                Weapons = server.Weapons ?? [],
+                Slots = server.Slots ?? [],
+                WeaponHexes = server.WeaponHexes ?? 4,
+            });
+            server.SelectedShip = 0;
+
+            server.Weapons = null;
+            server.Slots = null;
+            server.WeaponHexes = null;
+        }
+
+        Bot = null;
+    }
+
+    /// <summary>
+    /// A deep-enough copy of a tuning: every value, and fresh collections rather than shared ones.
+    /// Round-tripping through the serializer keeps this honest when properties are added later —
+    /// a hand-written copy is a list that silently stops being complete.
+    /// </summary>
+    public static BotTuning CloneTuning(BotTuning? source)
+    {
+        if (source is null) return new BotTuning();
+        var json = JsonSerializer.Serialize(source, JsonOptions);
+        return JsonSerializer.Deserialize<BotTuning>(json, JsonOptions) ?? new BotTuning();
+    }
+
+    /// <summary>Copies the current ship's setup under a new name, so a second hull starts from
+    /// something that works rather than from defaults.</summary>
+    public ShipProfile DuplicateCurrentShip(string name)
+    {
+        var from = CurrentServer?.CurrentShip;
+        var copy = new ShipProfile
+        {
+            Name = name,
+            Tuning = CloneTuning(from?.Tuning),
+            WeaponHexes = from?.WeaponHexes ?? 4,
+            // Slots and ability ids are deliberately NOT copied. They belong to the hull that
+            // learned them -- slot 4 on a Vanir is not slot 4 on a Raptor -- and carrying them
+            // over would have the new ship firing the old one's guns by id.
+        };
+        CurrentServer?.Ships.Add(copy);
+        return copy;
     }
 
     /// <summary>
@@ -207,37 +347,47 @@ public sealed class Config
     /// stays put, even when the units under it have shifted — the alternative is a config file
     /// that silently rewrites your choices every time the code learns something.
     /// </summary>
+    /// <remarks>Runs per ship, because there is a tuning per ship now. Every one of them may have
+    /// come from an old file, and a ship added later starts at current defaults and is untouched
+    /// by all of it.</remarks>
     private void MigrateTuning()
+    {
+        foreach (var server in Servers)
+            foreach (var ship in server.Ships)
+                MigrateOneTuning(ship.Tuning);
+    }
+
+    private static void MigrateOneTuning(BotTuning t)
     {
         // Was a distance from the rock's CENTRE, now a gap to its surface. 179 from the centre of
         // a typical rock is about 120 from its face, so an untouched default keeps its behaviour.
-        if (Math.Abs(Bot.AsteroidStandoff - 179f) < 0.01f) Bot.AsteroidStandoff = 120f;
+        if (Math.Abs(t.AsteroidStandoff - 179f) < 0.01f) t.AsteroidStandoff = 120f;
 
         // A flat 130u made a 38u rock into a 168u no-go sphere. The margin is for the ship, and
         // it is now floored by the ship's own size instead of guessing large.
-        if (Math.Abs(Bot.CollisionMargin - 130f) < 0.01f) Bot.CollisionMargin = 70f;
+        if (Math.Abs(t.CollisionMargin - 130f) < 0.01f) t.CollisionMargin = 70f;
 
         // Renamed when the settings moved onto BotTuning. Only an older file carries the old key.
-        if (Bot.AutoRepairShip is { } legacyRepair)
+        if (t.AutoRepairShip is { } legacyRepair)
         {
-            Bot.AutoRepair = legacyRepair;
-            Bot.AutoRepairShip = null;
+            t.AutoRepair = legacyRepair;
+            t.AutoRepairShip = null;
         }
 
         // An older bot.json only ever held one resource. Promote it to a one-entry priority list
         // the first time, so the setting you picked keeps meaning what it did.
-        if (Bot.WantedResources.Count == 0
-            && Enum.TryParse<ResourceType>(Bot.WantedResource, out var legacyResource)
+        if (t.WantedResources.Count == 0
+            && Enum.TryParse<ResourceType>(t.WantedResource, out var legacyResource)
             && legacyResource != ResourceType.Any)
         {
-            Bot.WantedResources.Add(legacyResource);
+            t.WantedResources.Add(legacyResource);
         }
-        Bot.WantedResource = null;
+        t.WantedResource = null;
 
         // Filtered against what a rock can actually hold: an earlier build offered cubits, uranium
         // and plutonium, so a saved list can still rank things that will never match. Left in
         // place they would occupy priority slots above resources that do exist.
-        Bot.WantedResources.RemoveAll(r => !Resources.IsMinable(r));
+        t.WantedResources.RemoveAll(r => !Resources.IsMinable(r));
     }
 
     /// <summary>
@@ -249,9 +399,10 @@ public sealed class Config
     private void MigrateUnboundSlots()
     {
         foreach (var server in Servers)
-            foreach (var slot in server.Slots)
-                if (slot.SlotId == 0 && slot.Name.Length == 0 && slot.Role.Length == 0)
-                    slot.SlotId = -1;
+            foreach (var ship in server.Ships)
+                foreach (var slot in ship.Slots)
+                    if (slot.SlotId == 0 && slot.Name.Length == 0 && slot.Role.Length == 0)
+                        slot.SlotId = -1;
     }
 
     /// <summary>Keeps a fresh install (or an old flat bot.json) usable without hand-editing.</summary>

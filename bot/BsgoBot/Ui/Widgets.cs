@@ -720,3 +720,56 @@ public sealed class MonoText : Control
         }
     }
 }
+
+/// <summary>Small shared helpers that do not warrant a control of their own.</summary>
+public static class Widgets
+{
+    /// <summary>
+    /// Asks for one line of text, themed like the rest of the window.
+    ///
+    /// Exists because the framework's own input box lives in the VisualBasic assembly and arrives
+    /// in system colours, which on a dark form reads as a bug.
+    /// </summary>
+    public static string? Prompt(IWin32Window owner, string title, string label, string initial = "")
+    {
+        using var dlg = new Form
+        {
+            Text = title,
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            StartPosition = FormStartPosition.CenterParent,
+            MinimizeBox = false,
+            MaximizeBox = false,
+            ClientSize = new Size(380, 132),
+            BackColor = Theme.Bg,
+            ForeColor = Theme.Text,
+            Font = Theme.Ui,
+        };
+
+        var caption = new Label
+        {
+            Text = label,
+            AutoSize = false,
+            Bounds = new Rectangle(16, 14, 348, 20),
+            ForeColor = Theme.Muted,
+        };
+
+        var box = new TextBox
+        {
+            Text = initial,
+            Bounds = new Rectangle(16, 40, 348, 26),
+            BackColor = Theme.Card,
+            ForeColor = Theme.Text,
+            BorderStyle = BorderStyle.FixedSingle,
+        };
+
+        var ok = new FlatButton { Text = "OK", Bounds = new Rectangle(196, 84, 80, 30), DialogResult = DialogResult.OK };
+        var cancel = new FlatButton { Text = "Cancel", Bounds = new Rectangle(284, 84, 80, 30), DialogResult = DialogResult.Cancel };
+
+        dlg.Controls.AddRange([caption, box, ok, cancel]);
+        dlg.AcceptButton = ok;
+        dlg.CancelButton = cancel;
+        Theme.UseDarkTitleBar(dlg);
+
+        return dlg.ShowDialog(owner) == DialogResult.OK ? box.Text : null;
+    }
+}
