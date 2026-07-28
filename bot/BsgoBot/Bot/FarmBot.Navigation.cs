@@ -600,16 +600,89 @@ public sealed partial class FarmBot
     ///
     /// Floored by twice our own hull, which is the number the margin is actually for.
     /// </summary>
-    private float SafetyMargin => Math.Max(T.CollisionMargin, MyRadius * 2f);
+    /// <remarks>
+    /// One hull radius, not two. The doubling here was calibrated when <see cref="MyRadius"/> was
+    /// the World card's ~35u for every ship, so <c>35 x 2</c> happened to land on the same 70u the
+    /// margin already defaulted to and the term never really bit. Now that the number is the real
+    /// half-size it does bite, and one radius is what the geometry asks for: a hull rotating on the
+    /// spot sweeps a sphere of its own half-length, and that is the clearance it needs.
+    /// </remarks>
+    private float SafetyMargin => Math.Max(T.CollisionMargin, MyRadius);
 
-    /// <summary>Our own half-size, from our hull's World card. 0 until the card arrives.</summary>
+    /// <summary>
+    /// Our own half-size, which decides every clearance, brake distance and standoff the ship flies.
+    ///
+    /// <para><b>The server never tells us.</b> Reply.WhoIs carries a radius for asteroids,
+    /// planetoids, planets, triggers and volumes — and for no ship of any kind, ours included
+    /// (see <c>WhoIsReader</c>). Collision on the server side runs off per-prefab collider
+    /// templates that are not on the wire at all, and are not spheres either: Galactica's is a box
+    /// of 200 x 75 x 600 half-extents. So there is no number to read, only numbers to infer.</para>
+    ///
+    /// <para>Three sources, best first:</para>
+    /// <list type="number">
+    /// <item><see cref="BotTuning.HullRadius"/>, typed in. Per ship, and it beats everything —
+    /// a measured hull is not a guess.</item>
+    /// <item>The furthest hardpoint on our World card from the ship's centre. Guns and engines are
+    /// mounted along the hull, and the server itself computes weapon range from
+    /// <c>spotDesc.getLocalPosition()</c>, so this is real geometry rather than an invented
+    /// constant. It is a <b>lower bound</b> — the hull carries on past the last gun.</item>
+    /// <item>The World card's own Radius, which is what this used to use alone. On a Vanir it
+    /// reads about 35u, which is a Raptor, and is why a line ship was being flown into rocks
+    /// like a strike craft.</item>
+    /// </list>
+    /// </summary>
     private float MyRadius
     {
         get
         {
+            if (T.HullRadius > 0f) return T.HullRadius;
+
             uint guid = _world.Get(_world.MyObjectId)?.CardGuid ?? 0;
-            return guid == 0 ? 0f : Cards.World(guid)?.Radius ?? 0f;
+            if (guid == 0) return 0f;
+            if (Cards.World(guid) is not { } card) return 0f;
+
+            return Math.Max(card.Radius, FurthestHardpoint(card));
         }
+    }
+
+    /// <summary>Which of the three sources <see cref="MyRadius"/> is actually using, in words,
+    /// so the diagnostics can say whether the number is measured or merely assumed.</summary>
+    private string HullRadiusSource
+    {
+        get
+        {
+            if (T.HullRadius > 0f) return "you typed it in for this ship";
+
+            uint guid = _world.Get(_world.MyObjectId)?.CardGuid ?? 0;
+            if (guid == 0 || Cards.World(guid) is not { } card)
+                return "UNKNOWN — no hull card yet, clearances are running on the margin alone";
+
+            float spots = FurthestHardpoint(card);
+            if (spots > card.Radius)
+                return $"furthest of {card.Spots.Count} hardpoint(s); a lower bound, the hull "
+                     + $"runs past its outermost gun (card says {card.Radius:F0}u)";
+
+            return card.Radius > 0f
+                ? $"the hull card's own radius ({card.Radius:F0}u) — no hardpoints to measure. "
+                + "If the ship is bigger than this, type it in"
+                : "UNKNOWN — the card states no radius and has no hardpoints";
+        }
+    }
+
+    /// <summary>
+    /// How far the outermost mounted thing sits from the ship's centre.
+    ///
+    /// Every gun, launcher and engine on the hull is a spot with a local position, so the spread
+    /// of them measures the hull that carries them. A Raptor's are within a few tens of units of
+    /// its centre; a line ship's are hundreds apart, which is exactly the difference the
+    /// collision code needs to know about and had no way to see.
+    /// </summary>
+    private static float FurthestHardpoint(Cards.WorldCardInfo card)
+    {
+        float furthest = 0f;
+        foreach (var spot in card.Spots)
+            furthest = Math.Max(furthest, spot.LocalPosition.Length());
+        return furthest;
     }
 
     // ------------------------------------------------------------------ what a clip actually costs

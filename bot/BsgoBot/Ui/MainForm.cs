@@ -63,6 +63,7 @@ public sealed class MainForm : Form
     private NumberField _numBoost = null!;
     private NumberField _numKeepOut = null!;
     private NumberField _numTravel = null!;
+    private NumberField _numHull = null!;
 
     private Panel _header = null!;
     private Panel _viewHost = null!;
@@ -581,6 +582,12 @@ public sealed class MainForm : Form
         _numRock.ValueChanged += (_, _) =>
             _bot.T.AsteroidStandoff = _cfg.Tuning.AsteroidStandoff = _numRock.Value;
 
+        // The one number about the hull the server never sends, and everything about not hitting
+        // things is built on it. 0 measures the hardpoint spread, which is a lower bound.
+        _numHull = new NumberField(0, 2000, 5, (int)_cfg.Tuning.HullRadius, "u");
+        _numHull.ValueChanged += (_, _) =>
+            _bot.T.HullRadius = _cfg.Tuning.HullRadius = _numHull.Value;
+
         // 0 means "work it out" — the automatic sources are all guesses of one kind or another,
         // so typing the real number in is the only way to be sure it flies at full speed.
         // These are the two numbers you read off the ship: cruise, and boost.
@@ -618,6 +625,7 @@ public sealed class MainForm : Form
             // from the rock's centre, which is why typing 50 into it did nothing.
             (RailCaption("TRAVEL FOR ORE"), 1), (_numTravel, 1),
             (RailCaption("GAP TO ROCK"), 1), (_numRock, 1),
+            (RailCaption("SHIP HALF-SIZE"), 1), (_numHull, 1),
             (RailCaption("KEEP OFF GUNS"), 1), (_numKeepOut, 1),
             (RailCaption("CRUISE SPEED"), 1), (_numSpeed, 1),
             (RailCaption("BOOST SPEED"), 1), (_numBoost, 1),
@@ -1145,6 +1153,7 @@ public sealed class MainForm : Form
         _numRange.Value = (int)t.FallbackRange;
         _numRetreat.Value = (int)(t.RetreatHull * 100f);
         _numRock.Value = (int)t.AsteroidStandoff;
+        _numHull.Value = (int)t.HullRadius;
         _numSpeed.Value = (int)t.TopSpeedOverride;
         _numBoost.Value = (int)t.BoostSpeedOverride;
         _numKeepOut.Value = (int)t.HostileStationKeepOut;

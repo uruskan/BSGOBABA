@@ -210,6 +210,22 @@ public sealed class BotTuning
     public float MinimumStandoff { get; set; } = 150f;
 
     /// <summary>
+    /// This ship's half-size in units — bow to centre, or centre to wingtip, whichever is larger.
+    /// 0 works it out.
+    ///
+    /// <para>The single most important number about a hull that the server never sends. Reply.WhoIs
+    /// carries a radius for rocks and planets and for no ship at all, so the bot has only ever been
+    /// able to infer this — and inferred it as ~35u for an Advanced Vanir, which is a Raptor. Every
+    /// clearance sphere, every braking distance and every standoff floor is built on it, so one
+    /// wrong number here flies a line ship into a belt like a strike craft.</para>
+    ///
+    /// <para>Left at 0 the bot measures the spread of the hull's own hardpoints, which is a lower
+    /// bound: the ship carries on past its outermost gun. If it still clips things, type the real
+    /// figure — it beats every guess. Per ship, like everything else here.</para>
+    /// </summary>
+    public float HullRadius { get; set; }
+
+    /// <summary>
     /// The <b>closest</b> the ship will get to an asteroid's <b>surface</b>. The rock's own radius
     /// is added on top, so one number works for a 30u pebble and a 400u boulder alike.
     ///

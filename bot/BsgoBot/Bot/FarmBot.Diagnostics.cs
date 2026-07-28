@@ -124,7 +124,12 @@ public sealed partial class FarmBot
                                      CurrentTarget, DateTime.UtcNow, out float room);
             lines.Add($"clearance      asteroid r×{AsteroidColliderFactor:F2} +{T.AsteroidCollisionMargin:F0}u, "
                     + $"planetoid r×{T.PlanetoidClearanceFactor:F2} +{T.PlanetoidCollisionMargin:F0}u, "
-                    + $"other r +{SafetyMargin:F0}u (hull {MyRadius:F0}u)");
+                    + $"other r +{SafetyMargin:F0}u");
+
+            // Where our own size came from. Worth a line of its own because everything above is
+            // built on it and the server never states it — a wrong value here is invisible
+            // otherwise, and looks like bad flying rather than a bad number.
+            lines.Add($"my hull        {MyRadius:F0}u half-size — {HullRadiusSource}");
 
             // Whether the sizes those clearances are built on are real or assumed. An assumed one
             // is not a problem in itself -- it is deliberately large -- but it is worth seeing,
