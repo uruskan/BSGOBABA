@@ -407,6 +407,33 @@ you put them in the prey list), and no rock or NPC inside their envelope is pick
 > ship only, so the bot cannot know a given platform's real reach. If something still reaches
 > you, raise it.
 
+### How it relaunches
+
+Out of the sector — docked, dead, or freshly logged in — one state machine owns the ship
+(`FarmBot.Hangar.cs`), in the order the server needs: answer the death screen, repair, wait
+`UndockDelaySeconds`, then `Room.Quit`, asking again every `RelaunchIntervalSeconds` until the
+ship is back in space.
+
+Three rules bound it. All three were bought with the 2026-07-28 crash: the server left a death
+unresolved, the bot re-launched at a client that had already loaded space every 45 seconds for
+half an hour until the client died — and the counters that survived that session then got the
+next two sessions closed by the server mid-login, in 0 seconds each.
+
+- **The client's own `Game/JumpIn` ends the asking.** It means the client left the room and its
+  space level is loaded, so the launch is the server's to finish — anything injected after it
+  (another `Room.Quit`, our own `JumpIn`, a re-answered death screen) lands in a client that is
+  already in space and only desyncs it. The bot waits up to 15s (`SpawnWaitSeconds`) for the
+  server to spawn the ship; healthy launches take 0.1–6.3s.
+- **A launch the server never finishes is counted, not retried forever.** No spawn inside the
+  15s → the sequence restarts once from `Room.Quit`; after 3 failures (`MaxSpawnWaitFailures`)
+  the farm stops and the log says to relog and press Go farm. Grinding on is proven to end with
+  a dead client, and a wedge like this is only ever fixed server-side.
+- **Nothing is injected without a live, settled session.** A session's end wipes the whole
+  hangar sequence — death screens, ask counters, spawn waits — and the machine refuses to run
+  until the next client is connected and relaying, with the undock delay counting from that
+  moment. The player id alone is no proof of a session: it is seeded from the profile and
+  survives a disconnect, which is exactly how "attempt 2" got injected into a login handshake.
+
 ## Settings
 
 Toolbar controls, persisted to `bot.json`:

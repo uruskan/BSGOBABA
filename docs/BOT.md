@@ -334,11 +334,35 @@ range spanning two orders of magnitude:
 **"Our hull" is measured, not published.** `Reply.WhoIs` carries a radius for asteroids,
 planetoids, planets, triggers and volumes — and for **no ship of any kind, ours included**. Real
 collision runs off per-prefab collider templates that never reach the wire and are not spheres
-(Galactica's is a box of 200 × 75 × 600 half-extents). So there are three sources, best first:
-`HullRadius` typed in per ship; otherwise the furthest hardpoint on the hull card from centre,
-which is real geometry the server itself computes weapon range from, and a **lower bound** since
-the hull runs past its outermost gun; otherwise the World card's own radius, which reads ~35u for
-an Advanced Vanir and is what had a line ship flying a belt like a strike craft.
+(Galactica's is a box of 200 × 75 × 600 half-extents). So it is worked out:
+
+```
+HullRadius (typed in)                              — wins outright, but see below
+max(card.Radius, furthest hardpoint) × HullMargin  — the normal path
+```
+
+The **hardpoint spread** is the real measurement: the World card lists every mount with a
+`LocalPosition` relative to centre, and the server computes weapon range from those same
+positions. It is a **lower bound** — the hull carries on past its outermost gun.
+
+The **margin** is what corrects for that, and it scales with class, so it is a multiplier rather
+than a flat addition: a strike craft is barely longer than the span of its own mounts and gets
+**1.0**; an escort `HullMarginEscort` (1.3); a line or capital hull `HullMarginLine` (1.6),
+because a line ship is mostly hull with a few guns on it.
+
+Class comes from the hull card's `Tier` (1 strike, 2 escort, 3 line, 4 capital), overridable with
+`ShipTierOverride` for when card fetching is off. **An unknown class applies no margin** — that
+keeps the old behaviour rather than inflating every clearance on a guess.
+
+`HullRadius` exists but is a poor thing to ask for: the game never shows a half-size anywhere, so
+the source that beats every guess is one the player generally cannot supply. Prefer setting the
+class.
+
+The `card.Radius` fallback deserves suspicion. In `ReadWorld` that field sits in the presentation
+block beside `SystemMapTexture`, `FrameIndex` and `ForceShowOnMap`, so it is very likely a map
+icon scale rather than a hull dimension — it reads ~8u for a Raptor and ~35u for a Vanir, both
+smaller than the asteroids being dodged. If the diagnostics line says the radius was used rather
+than the hardpoints, treat the number as meaningless.
 
 The `× 2` above was calibrated when that number was always ~35, so `35 × 2` landed on the 70u the
 margin already defaulted to and the term never bit. With a real half-size it does, and one radius
