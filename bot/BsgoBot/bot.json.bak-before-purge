@@ -1,0 +1,40 @@
+﻿{
+    "ListenHost":  "127.0.0.1",
+    "ListenPort":  27050,
+    "AutoStartProxy":  true,
+    "Servers":  [
+                    {
+                        "Name":  "Local C# server",
+                        "Host":  "127.0.0.1",
+                        "Port":  27060,
+                        "PlayerId":  "5085935",
+                        "Session":  "b1b23d2fa2769bd59d4c1b67554599b88381afd653b156aa54cb689969ab4fb7",
+                        "Language":  "en"
+                    },
+                    {
+                        "Name":  "Local bsgocore",
+                        "Host":  "127.0.0.1",
+                        "Port":  27060,
+                        "PlayerId":  "1",
+                        "Session":  "preconfigured-session",
+                        "Language":  "en"
+                    },
+                    {
+                        "Name":  "Live (captured)",
+                        "Host":  "94.16.108.128",
+                        "Port":  27050,
+                        "PlayerId":  "1",
+                        "Session":  "4A1616C55B762D4BB5B48CF832A37FC24DC4DAF44FDD8179BF1223B905A3E327",
+                        "Language":  "en"
+                    }
+                ],
+    "Clients":  [
+                    {
+                        "Name":  "BSGOFUN client",
+                        "Path":  "C:\\Program Files (x86)\\BSGOFUN\\client\\live",
+                        "Version":  "3b27980a3b7dd77e597872106ca98000"
+                    }
+                ],
+    "SelectedServer":  2,
+    "SelectedClient":  0
+}

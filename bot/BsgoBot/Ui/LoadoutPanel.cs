@@ -680,11 +680,20 @@ public sealed class LoadoutView : Panel
                 .OrderBy(id => id)
                 .ToList();
 
+            // Say what the bot BELIEVES each unplaced slot is, not just that it exists. A bare
+            // list of ids is what hid the bug that cost three sessions: the bot had decided #4
+            // was a repair module and would fire it at the hull, and the footer said "#4".
+            string Describe(ushort id)
+            {
+                var w = _bot.Weapons.Find(id);
+                return w is null || w.Role == WeaponRole.Unknown ? $"#{id}" : $"#{id}={w.Role}";
+            }
+
             string note = loose.Count == 0
                 ? "* role is yours, not a guess.   Every slot the bot knows about is placed."
-                : $"* role is yours, not a guess.   Not placed on any hex: "
-                  + string.Join(" ", loose.Take(14).Select(id => $"#{id}"))
-                  + (loose.Count > 14 ? $" +{loose.Count - 14} more" : "");
+                : $"* role is yours, not a guess.   Not placed, so NOT used: "
+                  + string.Join(" ", loose.Take(10).Select(Describe))
+                  + (loose.Count > 10 ? $" +{loose.Count - 10} more" : "");
 
             TextRenderer.DrawText(g, note, Theme.UiSmall,
                 new Rectangle(10, Height - 18, Width - 20, 16),

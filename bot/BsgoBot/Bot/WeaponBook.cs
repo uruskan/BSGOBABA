@@ -250,8 +250,16 @@ public sealed class WeaponBook
             bool guessAllowed = shooting && !anyDeclared;
 
             return _weapons.Values
-                .Where(w => w.Enabled &&
-                            (w.Role == role || (w.Role == WeaponRole.Unknown && guessAllowed)))
+                .Where(w => w.Enabled)
+                // The closed world the comment above promises, which this used to only half do.
+                //
+                // It filtered out abilities whose role was UNKNOWN, and let through every one the
+                // bot was merely CONFIDENT about — which is the wrong half. #4 was not an unknown
+                // slot the bot wondered about; it was an armour plate the bot was certain was a
+                // repair module, and certainty is exactly what walked it past the guard. Nothing
+                // you never placed on a hex is fired now, however sure the bot is about it.
+                .Where(w => !anyDeclared || w.RoleFromUser)
+                .Where(w => w.Role == role || (w.Role == WeaponRole.Unknown && guessAllowed))
                 .OrderBy(w => w.AbilityId)
                 .ToList();
         }
