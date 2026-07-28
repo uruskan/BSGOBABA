@@ -135,7 +135,15 @@ public sealed partial class FarmBot
                 // This is what the static case below has always done. The asteroid branch simply
                 // returned before reaching it.
                 float floor = Math.Max(gap, rockClear);
-                float band = PreferredRange(guns, 1f);
+
+                // Only when the band is a real published number. PreferredRange falls back to
+                // MAX range when no optimal is known, and max range is the one place that must
+                // not be chosen: hit chance is flat up to optimal and falls off past it, so
+                // parking at the edge of reach is parking where the shots miss. An unknown
+                // optimal therefore keeps the old close-in behaviour, which is merely wasteful
+                // rather than useless.
+                bool bandKnown = guns.Exists(w => w.OptimalRange is > 0);
+                float band = bandKnown ? PreferredRange(guns, 1f) : floor;
 
                 // Reach still caps it, but never below the floor: a firing position we would
                 // treat as a collision is not a firing position.
