@@ -210,15 +210,17 @@ public sealed class BotTuning
     public float MinimumStandoff { get; set; } = 150f;
 
     /// <summary>
-    /// The gap to leave between the ship and an asteroid's <b>surface</b>. The rock's own radius
+    /// The <b>closest</b> the ship will get to an asteroid's <b>surface</b>. The rock's own radius
     /// is added on top, so one number works for a 30u pebble and a 400u boulder alike.
+    ///
+    /// A floor, not a destination. Where the ship actually parks is the top of the mining
+    /// weapon's optimal band, because accuracy is flat across that band and closing spends travel
+    /// for nothing — this number only stops the band from putting the hull inside a rock. Raise it
+    /// if the ship keeps clipping things; it cannot make the ship sit further out than its guns.
     ///
     /// It used to be measured from the centre, which made it a setting you could not feel: it was
     /// floored by radius + margin, so on anything bigger than the number you typed the floor won
     /// and the value did nothing at all. 0 falls back to the derived standoff.
-    ///
-    /// Costs no accuracy to set low — the server's hit chance is flat at or below optimal range
-    /// (HitchanceBasedOnThrottle.getChanceToHit) and only falls off beyond it.
     /// </summary>
     public float AsteroidStandoff { get; set; } = 120f;
 

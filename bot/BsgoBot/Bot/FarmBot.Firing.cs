@@ -81,9 +81,13 @@ public sealed partial class FarmBot
     ///
     /// Every distance on the wire is centre-to-centre, and an asteroid is not a point — closing
     /// to 150u of the centre of a rock that is hundreds of units across is not a firing position,
-    /// it's a collision, and collisions kill. So the weapon's preferred range is only a floor:
-    /// the real one is the object's own radius plus clearance. Clamped to stay inside weapon
-    /// reach, because a standoff we can't shoot from is no use either.
+    /// it's a collision, and collisions kill. So the object's own radius plus clearance is a
+    /// <b>floor</b> under the answer, and weapon reach is the ceiling.
+    ///
+    /// <para>Between those two the weapon decides, and for anything that holds still the answer
+    /// is the top of its optimal band. Accuracy is flat across that band, so closing costs travel
+    /// and clearance and buys nothing — which matters most on exactly the ship that can least
+    /// afford it, a line hull with long guns threading a rock field.</para>
     /// </summary>
     private float StandoffFor(SpaceObj target, List<Weapon> guns)
     {
@@ -114,11 +118,28 @@ public sealed partial class FarmBot
                 // target — one drift, one rotation, one re-target and the ship is suddenly
                 // escaping the thing it was mining a moment ago. That is the churn in the log:
                 // engage at 168u, then "0u of room left ahead" against the very same rock.
-                float floor = ClearanceOf(target) * T.StandoffMargin;
+                float rockClear = ClearanceOf(target) * T.StandoffMargin;
+
+                // Both of those are FLOORS — the closest we are willing to get — not the place
+                // to aim for. Treating the gap as the destination is what flew a Vanir to 307u
+                // of a rock its mining lasers reach at 1,350u: a thousand units of travel, into
+                // the middle of a field of solid objects, in a hull that turns at 22 degrees a
+                // second, for nothing.
+                //
+                // Nothing is bought by closing. A rock does not manoeuvre, and the server's hit
+                // chance is flat at or below optimal range and only falls off beyond it
+                // (HitchanceBasedOnThrottle.getChanceToHit) — so a shot from the edge of the
+                // band lands exactly as often as one from arm's length. The band is therefore
+                // where to sit: same ore, less travel, and a large hull stays out of the rocks.
+                //
+                // This is what the static case below has always done. The asteroid branch simply
+                // returned before reaching it.
+                float floor = Math.Max(gap, rockClear);
+                float band = PreferredRange(guns, 1f);
 
                 // Reach still caps it, but never below the floor: a firing position we would
                 // treat as a collision is not a firing position.
-                return Math.Clamp(Math.Max(gap, floor), floor, Math.Max(reach * 0.95f, floor));
+                return Math.Clamp(Math.Max(band, floor), floor, Math.Max(reach * 0.95f, floor));
             }
 
             // Not clamped to weapon reach: a planetoid is worked by ordering a mining ship, not by
