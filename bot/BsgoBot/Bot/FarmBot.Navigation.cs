@@ -827,9 +827,18 @@ public sealed partial class FarmBot
     /// to clear it. If the turn already fits, braking is pure lost travel.
     ///
     /// Unknown turn rate keeps the old unconditional braking, because a guess here is a ram.
+    ///
+    /// <para><b>Asteroids only.</b> The angle test measures how far off the nose the obstacle's
+    /// edge sits, which is a fair proxy for a rock and badly wrong for anything large: a planetoid
+    /// with a 2,375u clearance sphere 500u ahead subtends about 39 degrees, so at 22 degrees a
+    /// second the test concludes the turn fits in under two seconds and skips the brake. Clearing
+    /// a sphere that size means <em>holding</em> the turn across thousands of units while still
+    /// closing, and time is precisely what braking buys. Planetoids, planets, stations and ships
+    /// therefore keep braking unconditionally.</para>
     /// </summary>
     private bool BrakingBuysTheTurn(SpaceObj blocker, float gap)
     {
+        if (blocker.Type != SpaceEntityType.Asteroid) return true;
         if (TurnSpeed is not { } degPerSec) return true;
 
         float speed = Math.Max(TopSpeed, 1f);
