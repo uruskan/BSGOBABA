@@ -774,7 +774,11 @@ public sealed partial class FarmBot
     /// </summary>
     private SpaceObj? NearestTarget(DateTime now)
     {
-        bool Any(SpaceObj o) => MiningCandidate(o);
+        // The drone keep-out lives here, in the CHOOSING tests, and deliberately not in
+        // MiningCandidate — which Keep also consults. A rock already being worked must not be
+        // dropped because a drone drifted past it; finishing is nearly always cheaper than
+        // starting again somewhere else, and the answer would flip back a few seconds later.
+        bool Any(SpaceObj o) => MiningCandidate(o) && !NearHostileMover(o);
         bool Wanted(SpaceObj o) => Any(o) && KnownContents(o, now);
 
         // Confirmed beats unconfirmed, then nearest wins within each. A rock we KNOW holds what
@@ -796,7 +800,11 @@ public sealed partial class FarmBot
         // finished, not churned. No oscillation is possible: the confirmed pass runs first and
         // its own pick passes this test, so the swap happens once and then holds.
         bool confirmedNearby = _world.Nearest(localWanted) is not null;
-        bool Keep(SpaceObj o) => Any(o) && (KnownContents(o, now) || !confirmedNearby);
+        // MiningCandidate, not Any: keeping is looser than choosing on purpose. Any excludes rocks
+        // with a drone loitering over them, which is right when picking one and wrong when the
+        // rock is already half broken — the drone moves, the answer flips back, and the ship ends
+        // up starting rocks it never finishes.
+        bool Keep(SpaceObj o) => MiningCandidate(o) && (KnownContents(o, now) || !confirmedNearby);
 
         if (confirmedNearby || _world.Nearest(localAny) is not null)
             return ResolveTarget(localWanted, honourPin: true, keep: Keep)
@@ -1045,9 +1053,12 @@ public sealed partial class FarmBot
         if (InStationDanger(o)) return false;
 
         // And not one with a drone loitering over it. Mining is twenty seconds of sitting still
-        // in the open, which is the worst possible way to share a neighbourhood with something
-        // that hunts. The belt has hundreds more rocks; it does not have a second hull.
-        if (NearHostileMover(o)) return false;
+        // NOT the drone keep-out. That belongs to CHOOSING a rock, and this predicate is also
+        // asked whether to KEEP one — see NearestTarget's Keep. A drone's whereabouts changes
+        // every second, so putting it here made a rock we were thirty seconds into stop being a
+        // candidate because something wandered within 2,000u, and the half-mined rock was
+        // abandoned. Selection applies it; retention must not. A worked rock is finished, not
+        // churned.
 
         bool known = KnownContents(o, now);
         if (known && o.ResourceCount == 0) return false;
