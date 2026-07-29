@@ -342,14 +342,64 @@ Obstacle avoidance sizes bodies by what they are, not by one flat number:
 
 | Body | Treated as | Knob |
 |---|---|---|
-| Asteroid | `radius × 0.9 + 40u` | `AsteroidCollisionMargin` |
-| Planetoid | `radius × 1.25 + 500u` | `PlanetoidCollisionMargin`, `PlanetoidClearanceFactor` |
-| Ships, stations, debris | `radius + 70u` | `CollisionMargin` |
+| Asteroid | `radius × 0.9 + max(40u, hull)` | `AsteroidCollisionMargin` |
+| Planetoid | `900u + max(120u, hull × 2)` | `PlanetoidCollisionMargin` |
+| Ships, stations, debris | `radius + max(130u, hull)` | `CollisionMargin` |
 
 The ×0.9 is the collider the server actually builds for a rock, so the margin only has to cover
 your own hull. A flat margin made small rocks four or five times their real size — enough that a
 ship in a dense belt is permanently inside somebody's exclusion sphere, braking and steering
 around rocks it had already cleared.
+
+A planetoid's 900u is not read off the wire and is not scaled by anything. Every planetoid on the
+server gets the same hard-coded 900u sphere (`SpaceObjectFactory.createPlanetoid`); the "radius"
+the wire carries is the client's model *scale factor*, around 1, and trusting it produced a 501u
+clearance against a 900u wall.
+
+### How it steers around things
+
+When something solid blocks the direct line, the heading swings out to that body's **tangent** —
+the shallowest heading whose entire ray clears the sphere — computed as `asin(1.1 × clearance /
+distance)` off the line to its centre, on whichever side the path already leans. It is recomputed
+from scratch every tick, so the path curves around the obstacle and snaps back to the target the
+moment it is no longer in front. There are no stored waypoints to go stale.
+
+Closer to the wall than that 1.1 margin allows, the turn goes to 108° — past the beam, so the
+heading is mostly *around* the body with a component pointing back *out* of it. A flat 90° is the
+true tangent and always clears, but it holds the distance constant, so a ship on that heading
+circles the body forever instead of leaving.
+
+Inside the clearance sphere there is no "around", only "out": the heading points straight away from
+the centre until the ship is clear by `EscapeClearance` (1.25×), which is hysteresis so that
+leaving is a decision rather than a boundary case.
+
+> **This replaced a deflection that could not work, and the failure was invisible for months.**
+> The old rule aimed at a *point* beside the obstacle — outside the sphere, but reached by a line
+> that was not. It left the nose `atan(1.25c / (d + c))` off the direct line when clearing the
+> sphere needs `asin(c / d)`; setting the first at least the second solves to **d ≥ 4.56 × c**.
+> For a rock (c ≈ 100u) that is ~460u, usually satisfied, and a clip is cheap when it is not. For a
+> planetoid (c = 1,400u on a line hull) it is ~6,400u — but `BlockerAhead` never sights one beyond
+> about 2,800u, so **against a planetoid the dodge had never once produced a clear line, at any
+> range, in any session.** The ship deflected, flew into the wall anyway, braked to
+> `MinApproachSpeed`, ground along the surface, penetrated, was shoved out radially, re-aimed, and
+> went back in. The 2026-07-29 log shows it exactly: 849u of room, then 455, 199, 47, then thirteen
+> consecutive ten-second windows at 0u, then "inside the clearance", then round again — 324 such
+> windows in one night.
+
+Braking for an obstacle buys no damage relief — the server's collision formula has no speed term at
+all — so its only value is the seconds it buys the turn, and it is skipped outright when the turn
+already fits (`BrakingBuysTheTurn`, asteroids only; large bodies subtend too wide an angle for that
+test to mean anything). A **planetoid** additionally never brakes below half top speed: its wall
+costs no hull whatsoever, so once the turn is ordered there is nothing left to buy, and 8u/s
+alongside a 1,400u sphere is a quarter of an hour of sidling.
+
+An asteroid that has spawned inside a planetoid — the resource spawner has no exclusion for the
+collider, so this is common — makes that one planetoid **transparent** for as long as it stays the
+target. Diving is the honest answer: the direct line always ends in the no-go zone, so avoidance
+would orbit the wall until the watchdog gave up on a perfectly good rock, while planetoid contact
+costs nothing but a shove once a second. The test is against the clearance sphere *plus our own
+standoff*, because what makes a rock unreachable is not where it sits but whether there is anywhere
+to park that the avoidance will permit.
 
 ### Where it thinks it is
 

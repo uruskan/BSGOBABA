@@ -155,8 +155,15 @@ public sealed partial class FarmBot
             // the collision code uses — the 900u collider plus margin — so the approach cannot
             // ask for a hold position the avoidance considers a collision, which is a standoff
             // and a dodge pulling against each other for as long as the bot is pointed at it.
+            //
+            // Times StandoffMargin, exactly as the asteroid branch above does it, and for the
+            // reason that branch spells out: the bare clearance is the boundary, and a ship parked
+            // ON the boundary flips between "holding station" and "inside an obstacle" on position
+            // noise alone. That was live here — PlanetoidStandoff is 1,200 and a line hull's
+            // planetoid clearance works out at 1,400, so the floor won and the hold position was
+            // the wall itself, to the unit.
             case SpaceEntityType.Planetoid when T.PlanetoidStandoff > 0:
-                return Math.Max(T.PlanetoidStandoff, ClearanceOf(target));
+                return Math.Max(T.PlanetoidStandoff, ClearanceOf(target) * T.StandoffMargin);
         }
 
         // Closing inside the optimal band only buys anything against something that manoeuvres.

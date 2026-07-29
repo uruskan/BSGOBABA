@@ -158,7 +158,7 @@ public sealed partial class FarmBot
         // Decided before the deflection, because it changes what counts as an obstacle at all:
         // a target buried inside a planetoid makes that one planetoid transparent for as long
         // as it stays the target.
-        _diveThrough = TargetBuriedIn(target, now);
+        _diveThrough = TargetBuriedIn(target, stopRange, now);
 
         var heading = DeflectAroundObstacles(desired, lookahead, target.Id, now, out bool deflected);
 
@@ -355,11 +355,35 @@ public sealed partial class FarmBot
     /// <summary>
     /// Turns a "point straight at it" heading into one that misses everything solid on the way.
     ///
-    /// When something blocks the direct line, the heading is swung to a point just outside that
-    /// obstacle's near edge — the shortest deflection that clears it. Recomputed every tick from
-    /// the direct line, so the path curves around the obstacle and snaps back to the target the
-    /// moment it is no longer in front: no waypoints to store and get stale.
+    /// When something blocks the direct line, the heading is swung out to the obstacle's
+    /// <b>tangent</b> — the shallowest heading whose whole ray clears the sphere. Recomputed every
+    /// tick from the direct line, so the path curves around the obstacle and snaps back to the
+    /// target the moment it is no longer in front: no waypoints to store and get stale.
     /// </summary>
+    /// <remarks>
+    /// <para><b>This used to aim at a point rather than along a tangent, and that could not work.</b>
+    /// The old line was <c>aim = obs + side*(clear*1.25) + dir*clear - me</c>: a point which is
+    /// itself outside the sphere, reached by a straight line which is not. With the obstacle dead
+    /// ahead at distance <c>d</c> and clearance <c>c</c>, that aim leaves the nose at
+    /// <c>atan(1.25c / (d + c))</c> off the direct line, while grazing the sphere needs
+    /// <c>asin(c / d)</c>. Setting the first at least the second solves to <b>d ≥ 4.56c</b> — below
+    /// that separation the ordered heading still runs into the very body it is dodging.</para>
+    ///
+    /// <para>For a rock (c ≈ 100u) the threshold is ~460u, usually satisfied, and a clip is cheap
+    /// when it is not. For a planetoid it is <b>~6,400u</b>, and the ship never sees one from that
+    /// far — <c>react = max(lookahead, clear)</c> in <see cref="BlockerAhead"/> caps the sighting at
+    /// about 2,800u. So against a planetoid the deflection had never once produced a clear line, at
+    /// any range, in any session. The log is the proof: 849u of room, then 455, 199, 47, then
+    /// thirteen consecutive windows of 0u, then "inside the clearance", then round again
+    /// (2026-07-29 02:09–02:12, #0E000005). Grinding along the wall at <see
+    /// cref="BotTuning.MinApproachSpeed"/> because a planetoid always passes <see
+    /// cref="BrakingBuysTheTurn"/>, penetrating, being shoved out radially, re-aiming, and diving
+    /// back in — 324 dodge lines in one night, each one a ten-second window.</para>
+    ///
+    /// <para>The tangent has no such threshold. It is by construction the heading that clears, at
+    /// every separation, and it degrades gracefully: the closer the wall, the harder it turns out,
+    /// reaching a beam-on-and-outward heading as the ship touches the margin band.</para>
+    /// </remarks>
     private Vector3 DeflectAroundObstacles(Vector3 desired, float lookahead, uint ignoreId,
                                            DateTime now, out bool deflected)
     {
@@ -378,7 +402,6 @@ public sealed partial class FarmBot
         var obs = blocker.PredictedPosition(now);
         var toObs = obs - me;
 
-        float along = Vector3.Dot(toObs, dir);
         float clear = ClearanceOf(blocker);
         if (blocker.Id == _escapeFrom) clear *= T.EscapeClearance;
 
@@ -396,26 +419,23 @@ public sealed partial class FarmBot
         // Out, with the margin to prove it.
         if (_escapeFrom == blocker.Id) _escapeFrom = 0;
 
-        // Push the aim to whichever side our path already favours: that is the smaller course
-        // change, and it keeps the deflection stable instead of flip-flopping between the two
-        // ways round on consecutive ticks.
-        var offset = dir * along - toObs;
-        float lateral = offset.Length();
-        var side = lateral > 1f ? offset / lateral : SidestepAxis(dir);
-
-        // `+ dir * clear` is what turns a dodge into a way past.
+        // The basis to turn in: straight at the obstacle, and the way our path already leans off
+        // it. Leaning the way we already are is the smaller course change, and it keeps the
+        // deflection stable instead of flip-flopping between the two ways round on consecutive
+        // ticks.
         //
-        // Without it the aim is a fixed point abeam the obstacle, at a set distance from its
-        // centre — so the ship flies to that point and then has nowhere further to go. The direct
-        // line is still blocked, so the deflection re-arms, and the aim vector shrinks to a few
-        // units whose direction swings wildly tick to tick. That is the loop: the ship hangs off
-        // the side of a planetoid jittering, never clearing it, forever. Leading the aim past the
-        // obstacle along the original heading gives the path somewhere to go.
-        var aim = obs + side * (clear * 1.25f) + dir * clear - me;
+        // `side` is perpendicular to the line to the CENTRE, not to the desired heading — that is
+        // the basis the rotation below is expressed in, and mixing the two is what made the old
+        // aim's geometry unanalysable. Whenever BlockerAhead has flagged this body the angle
+        // between `dir` and the centre line is under asin(clear/centre) < 90 degrees, so `dir`
+        // always has a positive component along the centre line and this component is the honest
+        // lateral one.
+        var n = toObs / centre;
+        var lean = dir - n * Vector3.Dot(dir, n);
+        var side = lean.LengthSquared() > 1e-4f ? Vector3.Normalize(lean) : SidestepAxis(n);
 
-        // A degenerate aim used to fall back to `desired`, which points into the thing we are
-        // dodging. The tangent is always the safer answer.
-        if (aim.LengthSquared() < 1f) aim = side * clear;
+        deflected = true;
+        var aim = TangentPast(n, side, centre, clear);
 
         // One second opinion, because in a belt the shortest way round one rock is very often
         // straight into the next one. The ship then brakes for THAT one, deflects back, and
@@ -427,15 +447,63 @@ public sealed partial class FarmBot
         // worse than committing to one.
         if (BlockerAhead(aim, lookahead, ignoreId, now, out _) is { } second && second.Id != blocker.Id)
         {
-            var other = obs - side * (clear * 1.25f) + dir * clear - me;
-            if (other.LengthSquared() >= 1f
-                && BlockerAhead(other, lookahead, ignoreId, now, out _) is null)
-                aim = other;
+            var other = TangentPast(n, -side, centre, clear);
+            if (BlockerAhead(other, lookahead, ignoreId, now, out _) is null) aim = other;
         }
 
-        deflected = true;
         return aim;
     }
+
+    /// <summary>
+    /// The heading that grazes a sphere of radius <paramref name="clear"/> whose centre lies
+    /// <paramref name="centre"/> units away along <paramref name="n"/>, passing it on the
+    /// <paramref name="side"/> side.
+    ///
+    /// <para>Rotating away from the centre line by <c>asin(clear / centre)</c> puts the ray exactly
+    /// on the sphere; <see cref="TangentMargin"/> inflates the radius first so it passes outside
+    /// with room, which is also what makes the ship spiral OUT rather than hold a constant radius
+    /// and orbit forever.</para>
+    ///
+    /// <para>Inside the margin band the rotation would want more than a right angle, which
+    /// <c>asin</c> cannot express. That case is real — it is a ship already scraping the wall — and
+    /// the answer is an obtuse turn: still round the body, but with a component pointing back out
+    /// of it. Being genuinely inside the clearance sphere is handled before this is ever called.</para>
+    /// </summary>
+    private static Vector3 TangentPast(Vector3 n, Vector3 side, float centre, float clear)
+    {
+        float sin = Math.Clamp(clear * TangentMargin / Math.Max(centre, 1f), 0f, 1f);
+        float theta = sin >= 1f ? BeamAndOut : MathF.Asin(sin);
+
+        // Scaled up only so the result comfortably clears the `LengthSquared() >= 1` guards that
+        // every caller applies before putting a heading on the wire. Callers use it as a direction.
+        return (n * MathF.Cos(theta) + side * MathF.Sin(theta)) * (centre + clear);
+    }
+
+    /// <summary>How much bigger than its real clearance to treat a body as when computing the
+    /// tangent past it. Pure margin: at 1.0 the ordered heading is exactly tangent, so a ship
+    /// holding it grazes the sphere at constant radius and never gets away from it.</summary>
+    private const float TangentMargin = 1.1f;
+
+    /// <summary>
+    /// The turn to order when the ship is inside the tangent's margin band — closer to the wall
+    /// than <see cref="TangentMargin"/> allows, but not yet inside the clearance sphere itself.
+    /// Just past a right angle, so the heading is mostly around the body and slightly out of it.
+    ///
+    /// <para><b>Past a right angle on purpose, and it costs a sliver.</b> A flat 90 degrees is the
+    /// true tangent from anywhere outside the sphere and always clears it — but it holds the radius
+    /// constant, so a ship on that heading circles the body at its current distance and never
+    /// leaves. The obtuse turn is what puts a negative radial component on the heading (cos 108° =
+    /// -0.31, so the separation grows at about a third of our speed) and gets the ship away.</para>
+    ///
+    /// <para>The price is that between the clearance sphere and 1.05 of it the ordered ray passes
+    /// <c>0.95 × centre</c> from the centre, i.e. marginally back inside the CLEARANCE sphere: at
+    /// 1.05 the miss is 1,398u against a 1,400u clearance. That is not a collision and is not
+    /// treated as one. Clearance for a line hull is the 900u collider plus 500u of hull margin, so
+    /// a 1,398u miss is some 500u clear of anything solid — and a planetoid's wall costs no hull in
+    /// any case (see <see cref="TargetBuriedIn"/>). One tick later the separation has grown and the
+    /// ordinary tangent takes over.</para>
+    /// </summary>
+    private const float BeamAndOut = MathF.PI * 0.6f;   // 108 degrees
 
     /// <summary>
     /// The planetoid the target sits inside of, or 0 when it sits in open space like anything
@@ -454,8 +522,16 @@ public sealed partial class FarmBot
     /// Keyed on the CLEARANCE sphere rather than the bare collider, deliberately: a rock in the
     /// shell between the two is technically in open space, but its approach line still ends
     /// inside the no-go zone and deflects forever all the same.
+    ///
+    /// <para>And keyed on the clearance sphere <b>plus our own hold position</b>, for the same
+    /// reason once removed. What makes a rock unapproachable is not where the rock is, it is
+    /// whether there is anywhere to <em>park</em> that the avoidance will permit — and we park
+    /// <paramref name="stopRange"/> short of it, on whichever side we arrive from. A rock sitting
+    /// just outside the wall has half its standoff ring inside it, so an approach from the wrong
+    /// bearing ends with the standoff pulling in and the escape shoving out, on the same tick,
+    /// forever. That is the same wedge as a buried rock and it wants the same answer.</para>
     /// </summary>
-    private uint TargetBuriedIn(SpaceObj target, DateTime now)
+    private uint TargetBuriedIn(SpaceObj target, float stopRange, DateTime now)
     {
         if (!T.AvoidCollisions) return 0;
 
@@ -464,14 +540,24 @@ public sealed partial class FarmBot
         {
             if (o.Id == target.Id || !o.HasPosition) continue;
             if (EntityTypes.Of(o.Id) != SpaceEntityType.Planetoid) continue;
-            if (Vector3.Distance(o.PredictedPosition(now), pos) >= ClearanceOf(o)) continue;
+            if (Vector3.Distance(o.PredictedPosition(now), pos) >= ClearanceOf(o) + stopRange) continue;
 
             if (_diveNoted != target.Id)
             {
                 _diveNoted = target.Id;
-                Log?.Invoke($"{target} sits inside {o}'s collider — diving straight in. "
-                          + "The wall costs no hull, only a shove once a second.");
+                float gap = Vector3.Distance(o.PredictedPosition(now), pos);
+                Log?.Invoke($"{target} is {gap:F0}u from {o}'s centre, inside the "
+                          + $"{ClearanceOf(o):F0}u clearance we hold at {stopRange:F0}u — "
+                          + "diving straight in. The wall costs no hull, only a shove a second.");
             }
+
+            // Nothing to escape from once the body has stopped existing for us. Left set, the id
+            // would sit there unreachable — BlockerAhead drops the dive target before any test, so
+            // neither the clear-on-exit at the top of DeflectAroundObstacles nor the one beside the
+            // inside-it branch can ever run — and the next body we genuinely did have to back out
+            // of would inherit a stale EscapeClearance on somebody else's sphere.
+            if (_escapeFrom == o.Id) _escapeFrom = 0;
+
             return o.Id;
         }
         return 0;
@@ -505,12 +591,41 @@ public sealed partial class FarmBot
     /// until 140u from its surface and then about a second and a half to stop. That is not a
     /// braking zone, it is an impact — and the ship bounces off, re-aims, and does it again.
     /// </summary>
+    /// <remarks>
+    /// The floor is what a wall is worth arriving at, and a planetoid's is not the same as a rock's.
+    /// <see cref="T:BsgoBot.Bot.FarmBot"/> already relies elsewhere on the fact that planetoid
+    /// contact deals <b>no hull damage whatsoever</b> — that is the whole premise of the dive in
+    /// <see cref="TargetBuriedIn"/>; bsgocore's CollisionResolution has no damage path for one, only
+    /// a PulseManeuver shove rate-limited to once a second. So the entire value of braking for a
+    /// planetoid is the seconds it buys the turn, and once the turn is ordered those seconds are
+    /// already bought.
+    ///
+    /// <para>Crawling on past that point is pure cost, and it is the cost that showed up as the ship
+    /// being stuck: the gap sits at 0 for minutes while the throttle is pinned to
+    /// <see cref="BotTuning.MinApproachSpeed"/>, and 8u/s alongside a body with a 1,400u clearance
+    /// sphere is a quarter of an hour of sidling. The one measured escape in the log
+    /// (2026-07-29 02:14–02:16, #0E000006) widened the gap from 313u to 420u in eighty seconds —
+    /// about 1.3u/s of actual progress away from the wall.</para>
+    ///
+    /// <para>An asteroid keeps the old floor. There the damage IS real, the sphere is small enough
+    /// that a crawl clears it in seconds, and arriving slowly is genuinely worth something.</para>
+    /// </remarks>
     private float ThrottlePastObstacle(SpaceObj blocker, float gap, float brakeZone)
     {
         float zone = Math.Max(brakeZone, ClearanceOf(blocker));
         float t = Math.Clamp(gap / zone, 0f, 1f);
-        return Math.Max(TopSpeed * MathF.Sqrt(t), T.MinApproachSpeed);
+
+        float floor = blocker.Type == SpaceEntityType.Planetoid
+            ? Math.Max(TopSpeed * PlanetoidBrakeFloor, T.MinApproachSpeed)
+            : T.MinApproachSpeed;
+
+        return Math.Max(TopSpeed * MathF.Sqrt(t), floor);
     }
+
+    /// <summary>Slowest we will go while sliding past a planetoid, as a fraction of top speed.
+    /// Not a safety number — the wall costs no hull — but a travel one: below about this the ship
+    /// cannot translate out of a 1,400u sphere in a useful amount of time.</summary>
+    private const float PlanetoidBrakeFloor = 0.5f;
 
     /// <summary>
     /// Throttle while backing out of something we are already inside.
