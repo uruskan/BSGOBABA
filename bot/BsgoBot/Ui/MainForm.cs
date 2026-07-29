@@ -71,6 +71,7 @@ public sealed class MainForm : Form
     private NumberField _numLocalTravel = null!;
     private NumberField _numTargetSector = null!;
     private readonly FlatButton _btnSectorHere = new();
+    private readonly AntiIdle _antiIdle = new();
     private NumberField _numShipClass = null!;
 
     private Panel _header = null!;
@@ -170,6 +171,14 @@ public sealed class MainForm : Form
         var ui = new System.Windows.Forms.Timer { Interval = 250 };
         ui.Tick += (_, _) => RefreshUiTimed();
         ui.Start();
+
+        // The client logs ITSELF out after 30 minutes without physical input — see AntiIdle.
+        // Kept alive only while the farm is on and a session is relaying: an idle client
+        // logging out when nobody is botting is the game behaving normally.
+        _antiIdle.Log += AppendLog;
+        var idle = new System.Windows.Forms.Timer { Interval = 30_000 };
+        idle.Tick += (_, _) => _antiIdle.Tick(_bot.Enabled && _proxy.ClientConnected);
+        idle.Start();
 
         Load += (_, _) =>
         {
