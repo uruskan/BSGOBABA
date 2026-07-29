@@ -422,6 +422,23 @@ public sealed partial class FarmBot
                : id == T.TargetSectorId ? " — the target sector."
                : $" — target is {T.TargetSectorId}, the bot will travel."));
 
+        // The AFK logout. A bot-flown ship produces none of the input the server counts as a
+        // person, so it starts a countdown, nobody clicks cancel at 4 AM, and the client quits
+        // itself — which reads as an overnight "crash" (three of them, 2026-07-29). While the
+        // farm is on, the bot presses the same cancel button a person would. While it is off,
+        // the timer is the user's own business and is only announced.
+        _world.DisconnectCountdown += seconds =>
+        {
+            if (Enabled)
+            {
+                _ = _act.StopDisconnect();
+                Log?.Invoke($"Server started a {seconds:F0}s logout countdown — cancelled it, farming on.");
+            }
+            else
+                Log?.Invoke($"Server started a {seconds:F0}s logout countdown. The farm is off, so it "
+                          + "will run out and the client will quit itself.");
+        };
+
         Fights.Log += m => Log?.Invoke(m);
         _world.LoadoutChanged += DumpLoadoutOnce;
         // Names come from the catalogue, so a fight record reads "colonial_raider" rather than

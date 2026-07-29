@@ -161,6 +161,11 @@ public sealed class WorldState
     /// is updated. Fires on every scene change, not only when the sector differs.</summary>
     public event Action<uint>? SectorIdentified;
 
+    /// <summary>The server started a logout countdown (Scene/DisconnectTimer) — this many
+    /// seconds until it disconnects us and the client quits itself. The AFK logout, mostly:
+    /// a bot-flown ship produces none of the input the server counts as a person.</summary>
+    public event Action<float>? DisconnectCountdown;
+
     /// <summary>Hangar id of the ship I am flying (PlayerProtocol Reply.ActiveShip). Not the
     /// same number as <see cref="MyObjectId"/>, which is the sector object.</summary>
     public ushort MyShipId { get; private set; }
@@ -596,6 +601,12 @@ public sealed class WorldState
     /// </summary>
     private void OnScene(ushort msgType, BgoReader r)
     {
+        if ((SceneOp.Reply)msgType == SceneOp.Reply.DisconnectTimer)
+        {
+            DisconnectCountdown?.Invoke(r.ReadSingle());
+            return;
+        }
+
         if ((SceneOp.Reply)msgType != SceneOp.Reply.LoadNextScene) return;
 
         // The one moment a sector change is BOTH certain and early enough. RemoveMe is not

@@ -233,11 +233,23 @@ public static class PlayerOp
 /// </summary>
 public static class SceneOp
 {
+    public enum Request : ushort
+    {
+        SceneLoaded = 1,
+        Disconnect = 2,
+        /// <summary>The "cancel logout" button: stops a server-side disconnect countdown.</summary>
+        StopDisconnect = 3,
+        QuitLogin = 4,
+    }
+
     public enum Reply : ushort
     {
         /// <summary>The server telling the client which level to load next. For a space level
         /// the payload names the sector id — the only place our own sector is ever stated.</summary>
         LoadNextScene = 1,
+        /// <summary>A logout countdown has started (float seconds left). The client shows a
+        /// timer with a cancel button; when it runs out, Disconnect follows and the client
+        /// quits itself — which from the outside looks exactly like a crash.</summary>
         DisconnectTimer = 2,
         Disconnect = 100,
     }

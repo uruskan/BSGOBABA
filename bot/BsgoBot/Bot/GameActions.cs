@@ -186,6 +186,11 @@ public sealed class GameActions(GameProxy proxy)
     /// </summary>
     public Task RequestUnanchor() => proxy.InjectAsync(Msg(GameOp.Request.RequestUnanchor));
 
+    /// <summary>The "cancel logout" button: SceneProtocol.RequestStopDisconnect, no payload.
+    /// Answers the server's disconnect countdown the same way a person at the keyboard would.</summary>
+    public Task StopDisconnect() =>
+        proxy.InjectAsync(new BgoWriter((byte)ProtocolId.Scene, (ushort)SceneOp.Request.StopDisconnect));
+
     /// <summary>
     /// Answer the death screen. The pair comes straight out of Reply.RespawnOptions, which sends
     /// two equal-length id lists — sectors and the carrier player each one belongs to (0 for a
