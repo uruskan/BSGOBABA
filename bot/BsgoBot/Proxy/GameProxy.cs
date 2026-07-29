@@ -61,6 +61,11 @@ public sealed class GameProxy : IDisposable
     public event Action? SessionStarted;
     public event Action? SessionEnded;
 
+    /// <summary>Raised, before <see cref="SessionEnded"/>, only when the game client was the
+    /// side that closed (or the relay itself failed) — the cases where the client process is
+    /// worth autopsying. A server-side drop leaves the client alive and is not this.</summary>
+    public event Action? ClientEndedSession;
+
     public event Action<string>? Log;
 
     public GameProxy(string serverHost, int serverPort)
@@ -191,6 +196,7 @@ public sealed class GameProxy : IDisposable
 
             lock (_recentInjections) _recentInjections.Clear();
             _endReason = null;
+            if (!_serverEndedIt) ClientEndedSession?.Invoke();
             _serverEndedIt = false;
             SessionEnded?.Invoke();
         }

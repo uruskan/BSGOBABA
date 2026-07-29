@@ -150,6 +150,7 @@ public sealed class MainForm : Form
         _bot.Log += AppendLog;
         _world.Log += AppendLog;
         _catcher.Log += AppendLog;
+        _proxy.ClientEndedSession += SnapshotClientLog;
         _catcher.Captured += AdoptCapturedSession;
 
         // When this instance is already parked on a live server, sessions for any other live
@@ -882,6 +883,35 @@ public sealed class MainForm : Form
         finally { _switchingView = false; }
 
         _cfg.SelectedView = title;
+    }
+
+    /// <summary>
+    /// Keep the game client's own Unity log the moment the client ends a session.
+    ///
+    /// Unity rewrites <c>output_log.txt</c> on every launch, so the record of why a client died
+    /// is destroyed by the very relaunch that follows it — which is how three overnight crashes
+    /// in a row left nothing to read. The copy costs nothing and turns the next "wtf crashed
+    /// the client" into an open file.
+    /// </summary>
+    private void SnapshotClientLog()
+    {
+        try
+        {
+            var dir = _cfg.CurrentClient?.Path;
+            if (string.IsNullOrEmpty(dir)) return;
+            var src = Path.Combine(dir, "bsgo_Data", "output_log.txt");
+            if (!File.Exists(src)) return;
+
+            var logs = Path.Combine(AppContext.BaseDirectory, "logs");
+            Directory.CreateDirectory(logs);
+            var dst = Path.Combine(logs, $"client-exit-{DateTime.Now:yyyyMMdd-HHmmss}.log");
+            File.Copy(src, dst, overwrite: true);
+            AppendLog($"The client ended the session — kept its Unity log as logs\\{Path.GetFileName(dst)}.");
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"Could not keep the client's Unity log: {ex.Message}");
+        }
     }
 
     private Control BuildLeftRail()

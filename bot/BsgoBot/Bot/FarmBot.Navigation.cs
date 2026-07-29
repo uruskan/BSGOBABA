@@ -131,7 +131,17 @@ public sealed partial class FarmBot
         // how far a second is depends on which gear we're in. It needs nothing but the distance,
         // so there is no circularity — and if an obstacle forces Regular later, the zones stay
         // sized for boost, which errs towards more room rather than less.
-        var gear = T.UseBoost && BoostSpeed > 0f && distance > BoostRunway(stopRange)
+        //
+        // With hysteresis, because the boundary is a place a ship can LIVE, not just pass
+        // through: holding station a few units outside the runway, position jitter crossed it
+        // four times a second, and every crossing was a SetGear on the wire plus a boost
+        // effect for the client to play — thousands of them in a night (2026-07-29, ~700u,
+        // minutes of Boost/Regular flapping before the client died). Entering boost now takes
+        // a fifth more distance than staying in it, so a ship parked at the line stays parked
+        // in one gear.
+        float runway = BoostRunway(stopRange);
+        var gear = T.UseBoost && BoostSpeed > 0f
+                && distance > (_gear == Gear.Boost ? runway : runway * 1.2f)
             ? Gear.Boost
             : Gear.Regular;
         float flying = SpeedInGear(gear);
