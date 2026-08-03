@@ -1,5 +1,5 @@
 # BSGO Farm Bot
-
+MİLLET BABA DİYİP GEÇİNEMİYO AQ
 A man-in-the-middle farm bot for a **private** Battlestar Galactica Online server. It sits
 between `bsgo.exe` and the server, watches the traffic to build a live picture of the sector, and
 injects game commands so the bot can fight and mine while the real client stays open and renders
